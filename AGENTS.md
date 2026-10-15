@@ -8,7 +8,31 @@ Ghostty at work, both with Nerd Fonts.
 
 Installing changes the user's Claude Code setup, so do it when John asks.
 
-- **One mod, interactively (preferred):** tell John to type this at the prompt of a terminal Claude Code session (it is a
+### Quick path (an agent with a shell, start to finish)
+
+You do not need a clone of this repository to install; the marketplace add clones its own copy over HTTPS.
+
+1. Check what is there: `claude plugin list` (skip mods already listed; see the duplicate note below) and
+   `echo $CLAUDE_CODE_PLUGIN_DIRS` plus `grep PLUGIN_DIRS ~/.claude/settings.json` (a working copy loaded that way
+   must not also be installed).
+2. Install at user scope (loads in every CLI session on the machine):
+   ```
+   claude plugin marketplace add olaugh/claude-mods      # once per machine; harmless "already added" otherwise
+   claude plugin install <mod>@olaugh-mods --scope user  # e.g. turn-copy@olaugh-mods
+   ```
+   No prompts; both run non-interactively from Bash. If the clone fails on credentials, run `gh auth setup-git`.
+3. Confirm with `claude plugin list` (the mod shows `Status: ✔ enabled`, `Scope: user`).
+4. Tell John to type `/reload-plugins` (or start a new session). You cannot run it yourself, and you cannot see the
+   terminal UI, so ask John to confirm the mod appears (turn-copy: a copy icon and `N chars · N lines` under each
+   finished reply). The reload summary's `N hooks` count does not include hooks modules, so `0 hooks` is normal.
+5. Nerd Font (turn-copy's icons): already set up on John's machines; check before installing anything.
+   `brew list --cask | grep nerd` (expect `font-fira-code-nerd-font`), Ghostty's `~/.config/ghostty/config`
+   (`font-family = FiraCode Nerd Font`). kitty draws Nerd Font symbols built in, whatever its `font_family`.
+   If missing: `brew install --cask font-fira-code-nerd-font`.
+
+### Other ways
+
+- **One mod, interactively:** tell John to type this at the prompt of a terminal Claude Code session (it is a
   slash command, not a shell command; it is not available inside the desktop app's Code tab):
   ```
   /plugin install turn-copy --marketplace olaugh/claude-mods
