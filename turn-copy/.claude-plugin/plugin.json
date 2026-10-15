@@ -1,0 +1,8 @@
+{
+  "name": "turn-copy",
+  "version": "0.1.0",
+  "description": "A copy button under each finished reply: copies the whole turn's text and flashes a check mark",
+  "author": {
+    "name": "olaugh"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "olaugh-mods",
+  "description": "olaugh's personal Claude Code mods",
+  "owner": {
+    "name": "olaugh"
+  },
+  "plugins": [
+    {
+      "name": "turn-copy",
+      "source": "./turn-copy",
+      "description": "A copy button under each finished reply that copies the whole turn and flashes a check mark"
+    }
+  ]
+}
