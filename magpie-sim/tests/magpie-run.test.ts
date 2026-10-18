@@ -21,8 +21,10 @@ import {
   type Intent,
 } from '../hooks/magpie'
 import { headerLine, reportLines, rowLine, tableLayout } from '../hooks/register'
+import { cardPicture } from '../hooks/card'
 import { encodePng } from '../hooks/png'
 import { parseSim, placedTiles, rackGhosts, resultText } from '../hooks/sim'
+import { parseFont } from '../hooks/truetype'
 import { fixtureFont } from './font-fixture'
 
 const CGP = '15/15/15/15/15/15/15/5DROP6/15/15/15/15/15/15/15 AEINRST/AQR 14/0 0 lex CSW24;'
@@ -654,4 +656,19 @@ test('/magpie picture asks Claude, in a prompt, to send a picture of what the pa
   expect(prompts.length).toBe(1)
   expect(prompts[0]).toMatch(/^Send the person this picture with SendUserFile/)
   expect(prompts[0]).toMatch(PICTURE_FILE)
+})
+
+test("the phone's picture draws a sim and an endgame, leaves and all", () => {
+  const font = parseFont(fixtureFont())
+  for (const sim of [parseSim(CGP_OUTPUT), parseSim(ENDGAME_SOLVE)]) {
+    const shown = sim.plays[0]
+    if (shown === undefined) {
+      throw new Error('no plays')
+    }
+    const picture = cardPicture(font, sim, shown, sim.rack, sim.kind)
+    expect(picture.width >= 720).toBe(true)
+    expect(picture.pixels.length).toBe(picture.width * picture.height * 4)
+  }
+  // An endgame play that keeps tiles shows them: 10H (S)LIVE keeps DER.
+  expect(parseSim(ENDGAME_SOLVE).plays[1]?.leave).toBe('DER')
 })

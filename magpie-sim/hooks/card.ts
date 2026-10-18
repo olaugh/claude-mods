@@ -74,8 +74,11 @@ export function cardPicture(font: Font, sim: Sim, shown: Play, title: string, su
   const widths = columns.map(column =>
     Math.max(textWidth(column.title, TEXT_SIZE), ...plays.map(play => textWidth(column.cell(play), TEXT_SIZE))),
   )
+  // The leave in tiles too, after the play's, as long as the longest.
+  const leaveSlots = Math.max(0, ...plays.map(play => play.leave.length))
   const tilesAt = MARGIN + rankWidth + labelWidth + COLUMN_GAP
-  const statsAt = tilesAt + slots * TILE_STEP + COLUMN_GAP
+  const leaveAt = tilesAt + slots * TILE_STEP + COLUMN_GAP
+  const statsAt = leaveSlots === 0 ? leaveAt : leaveAt + leaveSlots * TILE_STEP + COLUMN_GAP
   const width = Math.max(
     MIN_WIDTH,
     statsAt + widths.reduce((total, columnWidth) => total + columnWidth + COLUMN_GAP, 0) + MARGIN,
@@ -92,8 +95,8 @@ export function cardPicture(font: Font, sim: Sim, shown: Play, title: string, su
   drawText(canvas, font, subtitle, MARGIN, MARGIN + TITLE_SIZE + SUBTITLE_SIZE + 12, SUBTITLE_SIZE, LABEL)
   drawBoard(shifted(canvas, Math.floor((width - PICTURE_WIDTH) / 2), boardAt), font, sim.board, sim.rack, shown)
 
-  // The headings, then a row per play: rank, square, tiles, numbers right
-  // aligned.
+  // The headings, then a row per play: rank, square, its tiles, the leave's,
+  // numbers right aligned.
   const baselineIn = (top: number) => top + Math.floor(ROW_HEIGHT * 0.7)
   const drawNumbers = (cells: readonly string[], top: number, color: Rgb) => {
     let right = statsAt
@@ -104,6 +107,9 @@ export function cardPicture(font: Font, sim: Sim, shown: Play, title: string, su
   }
   drawText(canvas, font, '#', MARGIN, baselineIn(tableAt), TEXT_SIZE, LABEL)
   drawText(canvas, font, 'Play', MARGIN + rankWidth, baselineIn(tableAt), TEXT_SIZE, LABEL)
+  if (leaveSlots > 0) {
+    drawText(canvas, font, 'Leave', leaveAt, baselineIn(tableAt), TEXT_SIZE, LABEL)
+  }
   drawNumbers(
     columns.map(column => column.title),
     tableAt,
@@ -121,6 +127,16 @@ export function cardPicture(font: Font, sim: Sim, shown: Play, title: string, su
         letter,
         ...tileColors(letter, isThrough ? TILE_BG : PREVIEW_BG),
         isBold: !isThrough,
+        hasScore: false,
+        isLarge: true,
+      })
+    }
+    // The leave as the rack draws its tiles: not bold, a blank grey.
+    for (const [slot, letter] of [...play.leave].entries()) {
+      drawTile(canvas, font, leaveAt + slot * TILE_STEP, top + 3, {
+        letter,
+        ...tileColors(letter, TILE_BG),
+        isBold: false,
         hasScore: false,
         isLarge: true,
       })
