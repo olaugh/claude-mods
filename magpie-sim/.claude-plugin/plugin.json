@@ -1,0 +1,15 @@
+{
+  "name": "magpie-sim",
+  "version": "0.1.0",
+  "description": "Sim a crossword position in MAGPIE and browse the results in a pane, with a board picture of each play: /magpie <rack | CGP | .cgp/.gcg path or URL>",
+  "author": { "name": "olaugh" },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "magpieDir": {
+      "type": "string",
+      "title": "MAGPIE directory",
+      "description": "Where MAGPIE is installed: a directory holding bin/magpie and data/. Empty runs the magpie on PATH, which finds its own data.",
+      "default": "~/magpie"
+    }
+  }
+}
