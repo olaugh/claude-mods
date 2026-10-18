@@ -40,8 +40,9 @@ import {
 } from '../hooks/magpie'
 import { headerLine, reportLines, rowLine, tableLayout } from '../hooks/register'
 import { cardPicture } from '../hooks/card'
+import { boardPicture, tilesPicture } from '../hooks/draw'
 import { encodePng } from '../hooks/png'
-import { parseBoard, parseSim, placedTiles, rackGhosts, resultText } from '../hooks/sim'
+import { parseBoard, parseSim, placedTiles, rackGhosts, resultText, type Play } from '../hooks/sim'
 import { parseFont } from '../hooks/truetype'
 import { fixtureFont } from './font-fixture'
 
@@ -621,16 +622,111 @@ test('with the bag empty the endgame is solved, not simmed', async ($, on) => {
   expect(cgpUnseen(CGP)).toBe(100 - 4 - 7)
 })
 
-test('a PNG of stored blocks: signature, header, and every row', () => {
+// Deflate's fixed-code blocks undone, as a PNG reader would: enough to read
+// back what encodePng writes, in a test runtime with no inflate of its own.
+const LENGTH_BASE = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258]
+const LENGTH_EXTRA = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0]
+const DISTANCE_BASE = [
+  1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289,
+  16385, 24577,
+]
+const DISTANCE_EXTRA = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13]
+
+function inflateFixed(data: Uint8Array): number[] {
+  const out: number[] = []
+  let position = 0
+  const bit = () => ((data[position >>> 3] ?? 0) >>> (position++ & 7)) & 1
+  const bits = (count: number) => {
+    let value = 0
+    for (let index = 0; index < count; index++) {
+      value |= bit() << index
+    }
+    return value
+  }
+  // A Huffman code comes most significant bit first.
+  const code = (count: number, start = 0) => {
+    let value = start
+    for (let index = 0; index < count; index++) {
+      value = (value << 1) | bit()
+    }
+    return value
+  }
+  let isLast = false
+  while (!isLast) {
+    isLast = bit() === 1
+    if (bits(2) !== 1) {
+      throw new Error('not a block of fixed codes')
+    }
+    for (;;) {
+      const seven = code(7)
+      let symbol: number
+      if (seven <= 23) {
+        symbol = 256 + seven
+      } else {
+        const eight = code(1, seven)
+        symbol = eight <= 0xbf ? eight - 0x30 : eight <= 0xc7 ? 280 + eight - 0xc0 : 144 + code(1, eight) - 0x190
+      }
+      if (symbol === 256) {
+        break
+      }
+      if (symbol < 256) {
+        out.push(symbol)
+        continue
+      }
+      const length = (LENGTH_BASE[symbol - 257] ?? 0) + bits(LENGTH_EXTRA[symbol - 257] ?? 0)
+      const distanceCode = code(5)
+      const distance = (DISTANCE_BASE[distanceCode] ?? 0) + bits(DISTANCE_EXTRA[distanceCode] ?? 0)
+      for (let index = 0; index < length; index++) {
+        out.push(out[out.length - distance] ?? -1)
+      }
+    }
+  }
+  return out
+}
+
+// A PNG's chunks by type.
+function pngChunks(png: Uint8Array): Map<string, Uint8Array> {
+  const chunks = new Map<string, Uint8Array>()
+  const view = new DataView(png.buffer, png.byteOffset, png.byteLength)
+  for (let at = 8; at < png.length; at += 12 + view.getUint32(at)) {
+    chunks.set(String.fromCharCode(...png.subarray(at + 4, at + 8)), png.subarray(at + 8, at + 8 + view.getUint32(at)))
+  }
+  return chunks
+}
+
+// The PNG's rows as a reader gets them, after its zlib header.
+const pngRows = (png: Uint8Array) => inflateFixed((pngChunks(png).get('IDAT') ?? new Uint8Array()).subarray(2))
+
+test('a PNG: signature, header, and every row, compressed', () => {
   const png = encodePng(2, 3, new Uint8Array(2 * 3 * 4).fill(200))
   expect([...png.slice(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10])
   // IHDR: 13 bytes of width, height, 8 bits, truecolour.
-  expect(String.fromCharCode(...png.slice(12, 16))).toBe('IHDR')
-  expect([...png.slice(16, 29)]).toEqual([0, 0, 0, 2, 0, 0, 0, 3, 8, 2, 0, 0, 0])
-  // The rows: 3 of a filter byte and 2 RGB pixels, in one stored block.
-  const raw = 3 * (1 + 2 * 3)
-  expect(String.fromCharCode(...png.slice(37, 41))).toBe('IDAT')
-  expect(png.length).toBe(8 + 25 + (12 + 2 + 5 + raw + 4) + 12)
+  expect([...(pngChunks(png).get('IHDR') ?? [])]).toEqual([0, 0, 0, 2, 0, 0, 0, 3, 8, 2, 0, 0, 0])
+  expect([...(pngChunks(png).get('IDAT')?.slice(0, 2) ?? [])]).toEqual([0x78, 0x01])
+  // The rows: a filter byte and 2 RGB pixels each.
+  expect(pngRows(png)).toEqual([0, 200, 200, 200, 200, 200, 200, 0, 200, 200, 200, 200, 200, 200, 0, 200, 200, 200, 200, 200, 200])
+
+  // A board, every pixel read back, in a small part of its stored size;
+  // a row of tiles with its alpha.
+  const font = parseFont(fixtureFont())
+  const sim = parseSim(CGP_OUTPUT)
+  const board = boardPicture(font, sim.board, sim.rack, sim.plays[0] as Play)
+  const boardPng = encodePng(board.width, board.height, board.pixels)
+  const rowBytes = 1 + board.width * 3
+  const expected: number[] = []
+  for (let row = 0; row < board.height; row++) {
+    expected.push(0)
+    for (let col = 0; col < board.width; col++) {
+      const at = (row * board.width + col) * 4
+      expected.push(board.pixels[at] ?? 0, board.pixels[at + 1] ?? 0, board.pixels[at + 2] ?? 0)
+    }
+  }
+  expect(pngRows(boardPng)).toEqual(expected)
+  expect(boardPng.length).toBeLessThan((rowBytes * board.height) / 20)
+  const tiles = tilesPicture(font, [{ letter: 'Q', isThrough: false }], 1)
+  const tilesPng = encodePng(tiles.width, tiles.height, tiles.pixels, true)
+  expect(pngChunks(tilesPng).get('IHDR')?.[9]).toBe(6)
+  expect(pngRows(tilesPng).length).toBe((1 + tiles.width * 4) * tiles.height)
 })
 
 // A picture's making: the folder from TMPDIR, the PNG decoded there, sips;

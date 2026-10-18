@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { SortKey } from '../types'
 import { cardPicture } from './card'
-import { boardPicture, ROW_TILE_HEIGHT, ROW_TILE_STEP, tilesPicture, type Picture } from './draw'
+import { boardPicture, tilesPicture, type Picture } from './draw'
 import {
   cgpUnseen,
   applyMove,
@@ -56,7 +56,7 @@ import {
 import { encodePng } from './png'
 import { describePlay, parseBoard, parseSim, playTiles, resultText, type Play, type Sim } from './sim'
 import { boardSvg } from './svg'
-import { PICTURE_HEIGHT, PICTURE_WIDTH, SELECTED_ROW } from './theme'
+import { SELECTED_ROW } from './theme'
 import { parseFont, type Font } from './truetype'
 
 const PLUGIN = 'magpie-sim'
@@ -73,9 +73,8 @@ const TOP_PLAYS_TOLD = 8
 // The plays the pane lists, the sim's top ones.
 const PLAYS_LISTED = 15
 // The most bytes of pictures one tree may hold (Claude Code refuses more
-// than 2 MiB), less a margin; and a PNG's bytes beyond its pixels'.
+// than 2 MiB), less a margin.
 const IMAGE_BUDGET = 2_000_000
-const PNG_OVERHEAD = 4096
 // The /magpie lines a question keeps, the one that asked it last.
 const ASKED_KEPT = 3
 // Ten minutes, the most $.process.run allows.
@@ -147,9 +146,12 @@ export function loadFont($: EngineInterface): Promise<Font> {
   return fontLoad
 }
 
-// Pictures by play id, for the sim loaded now.
+// Pictures by play id, for the sim loaded now: compressed, many fit, the
+// listed plays' and those a sort or scroll reaches.
 const pictures = new Map<string, string>()
-const PICTURES_KEPT = 8
+const PICTURES_KEPT = 64
+// Between two pictures drawn ahead, so the pane's events run between them.
+const DRAW_AHEAD_MS = 15
 
 // The last sim parsed, by what it was parsed from: a run's output, or a file.
 let simLoad: { source: string; sim: Promise<Sim> } | null = null
@@ -168,6 +170,7 @@ export async function loadSim($: EngineInterface): Promise<Sim> {
   if (simLoad?.source !== source) {
     pictures.clear()
     rowPictures.clear()
+    drawingAhead = null
     const sim = text !== '' ? Promise.resolve().then(() => parseSim(text)) : $.fs.read(source).then(parseSim)
     simLoad = { source, sim }
     sim.catch(() => {
@@ -665,21 +668,27 @@ export function reportLines(sim: Sim, count: number): string[] {
     )
 }
 
-// A picture as a PNG's base64: three bytes a pixel, not RGBA's four, as a
-// tree holds at most IMAGE_BUDGET bytes of pictures; four where its clear
-// pixels must stay clear.
+// A picture as a compressed PNG's base64, a small part of its pixels' size:
+// what crosses to the terminal on each click, and what the tree's budget
+// counts. Alpha where its clear pixels must stay clear.
 function pngSource(picture: Picture, hasAlpha = false): string {
   return encodePng(picture.width, picture.height, picture.pixels, hasAlpha).toBase64()
 }
 
-// The selected play's picture as a PNG, the last few kept: each is about
-// 1.1 MB.
-function pictureSource(font: Font, sim: Sim, play: Play) {
+// The bytes a picture's base64 decodes to, as the budget counts them.
+const sourceBytes = (base64: string) => Math.floor((base64.length * 3) / 4)
+
+// The selected play's picture as a PNG, the last few dozen kept: each is
+// some 20 KB. The time a click waited on one is shown; one drawn ahead
+// (`isAhead`) kept no one waiting.
+function pictureSource(font: Font, sim: Sim, play: Play, isAhead = false) {
   let png = pictures.get(play.id)
   if (png === undefined) {
     const started = Date.now()
     png = pngSource(boardPicture(font, sim.board, sim.rack, play))
-    lastPictureMs = Date.now() - started
+    if (!isAhead) {
+      lastPictureMs = Date.now() - started
+    }
     if (pictures.size >= PICTURES_KEPT) {
       const oldest = pictures.keys().next().value
       if (oldest !== undefined) {
@@ -691,6 +700,36 @@ function pictureSource(font: Font, sim: Sim, play: Play) {
   }
   pictures.set(play.id, png)
   return { png }
+}
+
+// The sim whose listed plays' pictures are being drawn ahead.
+let drawingAhead: Sim | null = null
+
+/** Draws the listed plays' pictures ahead of any click, one each timer
+ * tick so the pane's own events run between them: a click then finds its
+ * picture made. Once a sim; a new one stops the last. */
+function drawAhead($: EngineInterface, font: Font, sim: Sim) {
+  if (drawingAhead === sim) {
+    return
+  }
+  drawingAhead = sim
+  const waiting = listedPlays(sim).filter(play => !pictures.has(play.id))
+  const count = waiting.length
+  const next = () => {
+    const play = waiting.shift()
+    if (drawingAhead !== sim) {
+      return
+    }
+    if (play === undefined) {
+      note(`drew ${count} pictures ahead`)
+      return
+    }
+    if (!pictures.has(play.id)) {
+      pictureSource(font, sim, play, true)
+    }
+    $.clock.after(DRAW_AHEAD_MS, next)
+  }
+  $.clock.after(DRAW_AHEAD_MS, next)
 }
 
 /** The plays the pane lists: the sim's top ones, as it ranks them. */
@@ -750,9 +789,6 @@ function rowTilesSource(font: Font, play: Play, isSelected: boolean) {
 const SELECTED_BACKGROUND = `#${SELECTED_ROW.map(channel => channel.toString(16).padStart(2, '0')).join('')}`
 const SELECTED_TEXT = '#ffffff'
 
-// About how many bytes a PNG of `width` by `height` takes, stored as it is,
-// with `channels` bytes a pixel.
-const pngBytes = (width: number, height: number, channels: number) => (1 + width * channels) * height + PNG_OVERHEAD
 
 async function sortBy($: EngineInterface, key: SortKey) {
   if ((await read($, sortKey)) === key) {
@@ -1545,13 +1581,15 @@ export const register: Register = (on, options) => {
         fontProblem = `Could not read ${FONT_FILE}: ${String(fontError)}`
       }
       // The terminal spells each play in tiles, as pictures, while they and
-      // the board's fit the tree's budget; else in letters.
-      const rowBytes = listed.reduce(
-        (total, play) => total + pngBytes(playTiles(play).tiles.length * ROW_TILE_STEP, ROW_TILE_HEIGHT, 4),
-        0,
-      )
-      const isTiled =
-        e.surface === 'terminal' && font !== null && pngBytes(PICTURE_WIDTH, PICTURE_HEIGHT, 3) + rowBytes <= IMAGE_BUDGET
+      // the board's fit the tree's budget (kept, so drawn once); else in
+      // letters.
+      const tiledBytes = (shownFont: Font) =>
+        sourceBytes(pictureSource(shownFont, sim, selected).png) +
+        listed.reduce((total, play) => total + sourceBytes(rowTilesSource(shownFont, play, play.id === selected.id).png), 0)
+      const isTiled = e.surface === 'terminal' && font !== null && tiledBytes(font) <= IMAGE_BUDGET
+      if (e.surface === 'terminal' && font !== null) {
+        drawAhead($, font, sim)
+      }
 
       // The full table where it fits, else its main columns; the board
       // beside it where both fit, else above.

@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
 import { glyphInk } from '../hooks/board'
 import { boardPicture } from '../hooks/draw'
@@ -206,6 +206,9 @@ const FIFTY_TEXT = [
 const MAX_IMAGE_SOURCE = 2 * 1024 * 1024
 
 test('a tall pane lists the top 15 plays, its pictures inside the tree budget', async ($, on) => {
+  const clock = mock.clock(on)
+  on('ui.panes', () => ({ value: [] }) as never)
+  on('session.surfaces', () => ({ value: ['terminal'] }) as never)
   on('ui.blit', () => ({ value: {} }) as never)
   on('fs.read', (_$, e) =>
     (e.as === 'bytes' ? { value: { base64: fixtureFont().toBase64() } } : { value: FIFTY_TEXT }) as never,
@@ -257,11 +260,16 @@ test('a tall pane lists the top 15 plays, its pictures inside the tree budget', 
     }
   }
   walk(tree)
-  expect(bytes).toBeGreaterThan(1_000_000)
-  expect(bytes).toBeLessThan(MAX_IMAGE_SOURCE)
+  // Compressed, the board and 15 rows are a sliver of the budget.
+  expect(bytes).toBeGreaterThan(10_000)
+  expect(bytes).toBeLessThan(MAX_IMAGE_SOURCE / 10)
   // The selected row (the first) on one colour, its tiles' picture with an
   // alpha channel (colour type 6, IHDR byte 25) so the others stay clear.
   expect([...selectedBackgrounds]).toEqual(['#385278'])
   expect(tilePngs.get('tiles-1A ETAERIO')?.[25]).toBe(6)
+  // The other listed plays' pictures drawn ahead, a timer tick each.
+  await clock.advance(1000)
+  const why = await $.command.run({ command: 'magpie', args: 'why' } as never)
+  expect(why.text).toContain('drew 14 pictures ahead')
   await ui.unmount()
 })
