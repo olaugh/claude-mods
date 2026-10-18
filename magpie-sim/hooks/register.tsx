@@ -1756,8 +1756,11 @@ export const register: Register = (on, options) => {
             <Box flexDirection="column">
               {shown.map(play => rowButton(play, `pick-${play.id}`, rowParts(layout, play, play.id === selected.id).before))}
             </Box>
+            {/* Keyed by its size: a picture sent again under the same id in a
+                box of another size is drawn in the old one (Ghostty), so a
+                new size is a new picture. */}
             <TileImage
-              key="tiles"
+              key={`tiles-${TILE_COLUMNS * tiles.slots}x${shown.length}`}
               source={tilesColumnSource(font, shown, selected.id, tiles.slots)}
               columns={TILE_COLUMNS * tiles.slots}
               rows={shown.length}

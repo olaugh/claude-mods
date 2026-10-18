@@ -170,7 +170,7 @@ for (const [surface, bodyColumns] of [
     expect(await ui.find({ type: 'Text', text: selected(1, surface === 'terminal' ? '-' : '-Q') })).toBeDefined()
     expect(await ui.find({ type: surface === 'terminal' ? 'Image' : 'Svg' })).toBeDefined()
     if (surface === 'terminal') {
-      expect(await ui.find({ type: 'Image', key: 'tiles' })).toBeDefined()
+      expect((await ui.findAll({ type: 'Image' })).some(image => image.key?.startsWith('tiles-') === true)).toBe(true)
     }
 
     await ui.press({ key: 'pick-8F DROP' })
@@ -238,7 +238,7 @@ test('a tall pane lists the top 20 plays, its pictures inside the tree budget', 
   // row's text backgrounds and the tile column's picture.
   let bytes = 0
   const selectedBackgrounds = new Set<string>()
-  let tiles: { png: Uint8Array; rows: number } | undefined
+  let tiles: { png: Uint8Array; rows: number; key: string } | undefined
   type Node = {
     type?: string
     props?: { key?: string; rows?: number; backgroundColor?: string; source?: { png?: string; rgba?: string } }
@@ -251,8 +251,8 @@ test('a tall pane lists the top 20 plays, its pictures inside the tree budget', 
     const { type, props, children } = node as Node
     const source = type === 'Image' ? (props?.source?.png ?? props?.source?.rgba) : undefined
     bytes += source === undefined ? 0 : Math.floor((source.length * 3) / 4)
-    if (type === 'Image' && props?.source?.png !== undefined && props.key === 'tiles') {
-      tiles = { png: Uint8Array.fromBase64(props.source.png), rows: props.rows ?? 0 }
+    if (type === 'Image' && props?.source?.png !== undefined && props.key?.startsWith('tiles-') === true) {
+      tiles = { png: Uint8Array.fromBase64(props.source.png), rows: props.rows ?? 0, key: props.key }
     }
     if (type === 'Text' && props?.backgroundColor !== undefined) {
       selectedBackgrounds.add(props.backgroundColor)
@@ -270,6 +270,8 @@ test('a tall pane lists the top 20 plays, its pictures inside the tree budget', 
   // (colour type 6, byte 25) so the rows not selected stay clear.
   expect([...selectedBackgrounds]).toEqual(['#385278'])
   expect(tiles?.rows).toBe(20)
+  // Keyed by its size, 7 tiles of two columns by 20 rows.
+  expect(tiles?.key).toBe('tiles-14x20')
   expect(new DataView((tiles?.png ?? new Uint8Array(32)).buffer).getUint32(20)).toBe(20 * 42)
   expect(tiles?.png[25]).toBe(6)
   // The other listed plays' pictures drawn ahead, a timer tick each.
