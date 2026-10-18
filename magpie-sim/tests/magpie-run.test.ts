@@ -3,6 +3,7 @@ import { expect, test } from 'claude-code/testing'
 
 import {
   canonicalWord,
+  cgpUnseen,
   checkLexicon,
   choosePosition,
   classifyPosition,
@@ -19,7 +20,7 @@ import {
   type Choice,
   type Intent,
 } from '../hooks/magpie'
-import { headerLine, reportLines, rowLine, tableLayout } from '../hooks/register'
+import { headerLine, reportLines, resultText, rowLine, tableLayout } from '../hooks/register'
 import { parseSim, placedTiles, rackGhosts } from '../hooks/sim'
 
 const CGP = '15/15/15/15/15/15/15/5DROP6/15/15/15/15/15/15/15 AEINRST/AQR 14/0 0 lex CSW24;'
@@ -288,7 +289,7 @@ test('positions are named short', () => {
 // Stands in for the host: HOME, the core count, the lexicons, MAGPIE (whose
 // scan of a GCG and whose sim answer from fixtures), and the model reading
 // /magpie's words, which answers `replies` in order.
-function fakeHost(on: On, scan = SCAN_ENDING, replies: string[] = []) {
+function fakeHost(on: On, scan = SCAN_ENDING, replies: string[] = [], endgame = '') {
   const runs: { argv: readonly string[]; stdin?: string; cwd?: string }[] = []
   on('process.run', (_$, e) => {
     runs.push({ argv: e.argv, stdin: e.init?.stdin, cwd: e.init?.cwd })
@@ -300,7 +301,9 @@ function fakeHost(on: On, scan = SCAN_ENDING, replies: string[] = []) {
           ? '12\n'
           : e.init?.stdin?.includes('next\n')
             ? scan
-            : CGP_OUTPUT
+            : e.init?.stdin?.includes('endgame\n')
+              ? endgame
+              : CGP_OUTPUT
     return {
       value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
     } as never
@@ -551,4 +554,47 @@ test('columns fit the longest play, through-tiles and all', () => {
   // Every row's Win% ends where the heading's does.
   const winEnd = header.indexOf('Win%▼') + 'Win%▼'.length
   expect(rows.every(row => /\d$/.test(row.slice(0, winEnd)) && row[winEnd] === ' ')).toBe(true)
+})
+
+// The solver on that endgame (testdata as MAGPIE printed it, cut to four
+// moves): the board, then each first move with what its line nets (V), the
+// final spread (S) and the line's later turns.
+const ENDGAME_SOLVE = `${ENDGAME_OUTPUT.split('\n1:')[0]}
+Endgame (depth: 6, time: 6.442s, status: finished)
+Play                          V  S   Turn 2            Turn 3                   Turn 4       Turn 5
+11H (S)ILVERED 74 (ELTUV +16) 90 319
+10H (S)LIVE 10                14 243 4K V(OU)LU 15     M8 RED 15 (ET +4)
+K11 VIR(I)D 18                14 243 4K V(OU)LU 15     11K (V)ELE 7 (ET +4)
+K12 DE(I) 4                   14 243 J11 TE 5          4K L(OU)R 7              7A V(A)U 10  O1 (C)IVE 16 (L +2)
+`
+
+test('an endgame reads as results: W+ or L- the final spread, and what the line nets', () => {
+  const solved = parseSim(ENDGAME_SOLVE)
+  expect([solved.kind, solved.rack, solved.plies, solved.seconds]).toEqual(['endgame', 'DEEILRV', 6, 6.442])
+  expect(solved.plays.map(play => [play.id, play.score, play.result, play.net, play.line])).toEqual([
+    ['11H (S)ILVERED', 74, 319, 90, '(ELTUV +16)'],
+    ['10H (S)LIVE', 10, 243, 14, '4K V(OU)LU 15 · M8 RED 15 (ET +4)'],
+    ['K11 VIR(I)D', 18, 243, 14, '4K V(OU)LU 15 · 11K (V)ELE 7 (ET +4)'],
+    ['K12 DE(I)', 4, 243, 14, 'J11 TE 5 · 4K L(OU)R 7 · 7A V(A)U 10 · O1 (C)IVE 16 (L +2)'],
+  ])
+  // What stays on the rack, for the board's ghosts.
+  expect(solved.plays[1]?.leave).toBe('DER')
+  expect(solved.board?.[10]?.[7]).toBe('S')
+  expect([resultText(20), resultText(-10), resultText(0)]).toEqual(['W+20', 'L-10', 'T=0'])
+  const layout = tableLayout(solved.plays, false, false, 'endgame')
+  expect(headerLine(layout, 'net', true)).toMatch(/Play +Sc +Result +Net▼ +Then/)
+  expect(rowLine(layout, solved.plays[0] as never, true)).toMatch(/^▶ +1 11H \(S\)ILVERED +74 +W\+319 +\+90 \(ELTUV \+16\)/)
+  expect(reportLines(solved, 1)).toEqual(['1. 11H (S)ILVERED: 74 pts, W+319, net 90; then (ELTUV +16)'])
+})
+
+test('with the bag empty the endgame is solved, not simmed', async ($, on) => {
+  // The scan's last position shows 5 unseen tiles: the other rack alone.
+  const scan = SCAN_ENDING.replace('   Nits  ELTUV    387\n', '   Nits  ELTUV    387\n 2|  -       "       "       -   |   Unseen: 5 (2v | 3c)\n')
+  const runs = fakeHost(on, scan, [], ENDGAME_SOLVE)
+  const result = await $.tool.call({ tool: 'mcp__magpie-sim__simulate', position: XT_GAME } as never)
+  expect(JSON.stringify(result)).toContain('1. 11H (S)ILVERED: 74 pts, W+319, net 90')
+  const solve = runs.find(run => run.stdin?.includes('endgame'))
+  expect(solve?.stdin).toBe(`load ${XT_GAME}\ngoto 23\nshgame\nendgame\n`)
+  expect(solve?.argv.join(' ')).toContain('-etopk 50')
+  expect(cgpUnseen(CGP)).toBe(100 - 4 - 7)
 })

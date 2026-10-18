@@ -29,9 +29,16 @@ export type Play = {
   staticEquity: number
   iterations: number
   plies: PlyStats[]
+  /** An endgame's: the final spread for the player to move, what the line
+   * nets them, and the rest of the line (a going-out play's end points). */
+  result?: number
+  net?: number
+  line?: string
 }
 
 export type Sim = {
+  /** A Monte Carlo sim, or an endgame solved (the bag empty). */
+  kind: 'sim' | 'endgame'
   /** Sorted, blanks last, as MAGPIE writes a rack. */
   rack: string
   lexicon: string
@@ -41,6 +48,7 @@ export type Sim = {
    * output printed no board (an opening rack). */
   board: string[] | null
   plays: Play[]
+  /** A sim's plies, or the endgame solver's depth. */
   plies: number
   iterations: number
   seconds: number
@@ -48,6 +56,13 @@ export type Sim = {
 }
 
 const PLAY_LINE = /^\s*(\d+):\s+(.*)$/
+// `shgame`'s header or top border, whichever holds the on-turn marker: a
+// name, a rack and a score.
+const ON_TURN = /^\s+(?:A B C D E F G H I J K L M N O|-{30})\s+>\s+(.+?)\s{2,}([A-Za-z?]{1,7})\s+-?\d+\s*$/m
+const ENDGAME_HEADER = /^Endgame \(depth: (\d+), time: ([\d.]+)s, status: ([^)]*)\)/
+// An endgame row's first move: square, word, score, and a going-out play's
+// end points in parentheses.
+const ENDGAME_MOVE = /^(pass|\S+\s+\S+)\s+(-?\d+)(?:\s+(\(.*\)))?$/
 // The Ig column: X for a play the threshold found too close to the best.
 const IGNORED_MARKS = new Set(['-', 'X'])
 // Wp, WpSE, Eq, EqSE, StEq, It.
@@ -180,8 +195,90 @@ export function parseBoard(lines: readonly string[]): string[] | null {
   return board?.length === BOARD_DIM ? board : null
 }
 
+/** The rack the player to move holds, as the last game printed shows it. */
+function onTurnRack(text: string): string | undefined {
+  const racks = [...text.matchAll(new RegExp(ON_TURN.source, 'gm'))]
+  return racks[racks.length - 1]?.[2]
+}
+
+/** An endgame as MAGPIE's solver prints it: a header with its depth and
+ * time, then a row per first move, its columns where the headings start:
+ * the move (and a going-out play's end points), V (what the line nets), S
+ * (the final spread), then each later turn of the line. */
+function parseEndgame(lines: readonly string[], at: number, rack: string): Pick<Sim, 'plays' | 'plies' | 'seconds' | 'status'> {
+  const header = ENDGAME_HEADER.exec(lines[at] ?? '')
+  const headings = lines[at + 1] ?? ''
+  const starts = [...headings.matchAll(/Play|V|S|Turn \d+/g)].map(match => match.index)
+  const [, netAt = 0, resultAt = 0, ...turnsAt] = starts
+  const plays: Play[] = []
+  for (let index = at + 2; index < lines.length && (lines[index] ?? '').trim() !== ''; index++) {
+    const row = lines[index] ?? ''
+    const cell = (from: number, to: number | undefined) => row.slice(from, to).trim()
+    const move = ENDGAME_MOVE.exec(cell(0, netAt))
+    if (move === null) {
+      continue
+    }
+    const what = move[1] ?? ''
+    const isPass = what === 'pass'
+    const [square = '', word = ''] = what.split(/\s+/)
+    const tiles = isPass ? '' : boardTilesAsDots(word)
+    const later = turnsAt.map((from, turn) => cell(from, turnsAt[turn + 1])).filter(turn => turn !== '')
+    const placed = isPass ? { row: 0, col: 0, isDown: false } : parseCoordinates(square)
+    const play: Play = {
+      rank: plays.length + 1,
+      id: isPass ? 'pass' : `${square} ${word}`,
+      kind: isPass ? 'pass' : 'place',
+      tiles,
+      ...placed,
+      leave: '',
+      score: Number(move[2]),
+      winPct: 0,
+      winSe: 0,
+      equity: 0,
+      equitySe: 0,
+      staticEquity: 0,
+      iterations: 0,
+      plies: [],
+      result: Number(cell(resultAt, turnsAt[0])),
+      net: Number(cell(netAt, resultAt)),
+      line: [move[3] ?? '', ...later].filter(part => part !== '').join(' · '),
+    }
+    play.leave = leaveAfter(rack, play)
+    plays.push(play)
+  }
+  return {
+    plays,
+    plies: Number(header?.[1] ?? 0),
+    seconds: Number(header?.[2] ?? 0),
+    status: header?.[3] ?? '',
+  }
+}
+
+// What stays on the rack once the play's tiles leave it.
+function leaveAfter(rack: string, play: Play): string {
+  const ghosts = rackGhosts(rack, play)
+  return [...rack].filter((_, index) => ghosts[index] !== true).join('')
+}
+
 export function parseSim(text: string): Sim {
   const lines = text.split('\n')
+  const endgameAt = lines.findIndex(line => ENDGAME_HEADER.test(line))
+  if (endgameAt >= 0) {
+    const rack = sortRack(onTurnRack(text) ?? '')
+    const endgame = parseEndgame(lines, endgameAt, rack)
+    if (endgame.plays.length === 0) {
+      throw new Error('the endgame solver printed no plays')
+    }
+    return {
+      kind: 'endgame',
+      rack,
+      lexicon: /^#\s*lexicon\s+(\S+)/m.exec(text)?.[1] ?? '',
+      label: /^#\s*label\s+(.*?)\s*$/m.exec(text)?.[1] ?? '',
+      board: parseBoard(lines),
+      iterations: 0,
+      ...endgame,
+    }
+  }
   // The sim's table is the run of play lines just before `Showing N of M
   // plays`; a move list printed earlier (by `shgame`) is another run.
   let plays: Play[] = []
@@ -233,8 +330,10 @@ export function parseSim(text: string): Sim {
     throw new Error('the output holds no simmed plays: was it printed with -hr false?')
   }
   return {
-    // Every play's spent tiles and leave make the rack; the first's will do.
-    rack: sortRack(spentTiles(first) + first.leave),
+    kind: 'sim',
+    // The player to move's, as shgame printed it; else every play's spent
+    // tiles and leave make it, the first's as well as any.
+    rack: sortRack(onTurnRack(text) ?? spentTiles(first) + first.leave),
     lexicon,
     label,
     board: parseBoard(lines),

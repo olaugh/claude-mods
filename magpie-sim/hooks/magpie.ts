@@ -437,6 +437,43 @@ export function simOptions(lexicon: string | undefined, threads: number, acceler
   ]
 }
 
+/** A position with tiles in the bag is simmed; one with the bag empty has its
+ * endgame solved. */
+export type Mode = 'sim' | 'endgame'
+
+// The endgame solver's best first moves to list, each with its line.
+export const ENDGAME_PLAYS = 50
+// The most tiles the player to move can fail to see with the bag empty: the
+// other rack.
+const ENDGAME_UNSEEN = 7
+// An English set, which a CGP's unseen tiles are counted from.
+const TILES_IN_SET = 100
+
+export function modeFor(unseen: number | undefined): Mode {
+  return unseen !== undefined && unseen <= ENDGAME_UNSEEN ? 'endgame' : 'sim'
+}
+
+/** The tiles a CGP's player to move cannot see: the set less the board's and
+ * their rack's. */
+export function cgpUnseen(cgp: string): number {
+  const [board = '', racks = ''] = cgp.trim().split(/\s+/)
+  const onBoard = (board.match(/[A-Za-z]/g) ?? []).length
+  const rack = (racks.split('/')[0] ?? '').length
+  return TILES_IN_SET - onBoard - rack
+}
+
+// The settings an endgame solve runs with, after `setoptions`.
+function endgameOptions(lexicon: string | undefined, threads: number): string[] {
+  return [
+    ...(lexicon === undefined ? [] : ['-lex', lexicon]),
+    '-wmp', 'true',
+    '-etopk', String(ENDGAME_PLAYS),
+    '-threads', String(threads),
+    '-hr', 'false',
+    ...ASCII_BOARD,
+  ]
+}
+
 /** The run that prints every position of a GCG: loaded at its start, then
  * one `next` at a time, each printing the game. */
 export function scanRun(source: string, lexicon: string | undefined): MagpieRun {
@@ -461,6 +498,9 @@ export type GcgPosition = {
   /** The events played once that move was: one more than `events`, or more
    * where MAGPIE takes a play and its challenge bonus as one step. */
   movedTo?: number
+  /** How many tiles the player to move cannot see: the bag and the other
+   * rack; an endgame from seven or fewer. */
+  unseen?: number
 }
 
 // Each printed game opens with the column letters.
@@ -476,15 +516,26 @@ const EVENT = /Event (\d+) \((.*?)\):[^\n]*\n[^\n]*\|\s+([^\n]*?)\s*$/m
  * who made it was the one to move: challenge bonuses, phonies taken off and
  * end-of-game points are events by the other player, or by nobody to move. */
 export function gcgPositions(output: string): GcgPosition[] {
-  const printed = new Map<number, { onTurn?: { player: string; rack: string }; event?: { player: string; what: string } }>()
+  const printed = new Map<
+    number,
+    { onTurn?: { player: string; rack: string; unseen?: number }; event?: { player: string; what: string } }
+  >()
   for (const game of output.split(PRINTED_GAME)) {
     if (!/A B C D E F G H I J K L M N O/.test(game)) {
       continue
     }
     const event = EVENT.exec(game)
     const onTurn = ON_TURN.exec(game)
+    const unseen = /Unseen: (\d+)/.exec(game)?.[1]
     printed.set(event === null ? 0 : Number(event[1]), {
-      onTurn: onTurn === null ? undefined : { player: onTurn[1] ?? '', rack: onTurn[2] ?? '' },
+      onTurn:
+        onTurn === null
+          ? undefined
+          : {
+              player: onTurn[1] ?? '',
+              rack: onTurn[2] ?? '',
+              ...(unseen === undefined ? {} : { unseen: Number(unseen) }),
+            },
       event: event === null ? undefined : { player: event[2] ?? '', what: event[3] ?? '' },
     })
   }
@@ -610,6 +661,7 @@ export function magpieRun(
   request: { lexicon?: string; goto?: string },
   threads: number,
   accelerators: Accelerators,
+  mode: Mode = 'sim',
 ): MagpieRun {
   const commands: string[] = []
   let lexicon = request.lexicon
@@ -630,9 +682,9 @@ export function magpieRun(
     // `load` leaves the game at its start.
     commands.push(`load ${position.source}`, `goto ${request.goto ?? 'end'}`)
   }
-  commands.push('shgame', 'gsimulate')
+  commands.push('shgame', mode === 'endgame' ? 'endgame' : 'gsimulate')
   return {
-    args: ['setoptions', ...simOptions(lexicon, threads, accelerators)],
+    args: ['setoptions', ...(mode === 'endgame' ? endgameOptions(lexicon, threads) : simOptions(lexicon, threads, accelerators))],
     stdin: `${commands.join('\n')}\n`,
     lexicon: lexicon ?? '',
   }

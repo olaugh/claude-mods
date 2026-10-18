@@ -1,4 +1,4 @@
-export type SortKey = 'win' | 'equity' | 'score' | 'static' | 'iterations' | 'play'
+export type SortKey = 'win' | 'equity' | 'score' | 'static' | 'iterations' | 'play' | 'result' | 'net'
 
 declare module 'claude-code' {
   interface PluginState {

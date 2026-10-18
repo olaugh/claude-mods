@@ -4,6 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { SortKey } from '../types'
 import { boardPicture, ROW_TILE_STEP, tilesPicture } from './draw'
 import {
+  cgpUnseen,
   checkLexicon,
   choosePosition,
   DEFAULT_LEXICON,
@@ -12,6 +13,7 @@ import {
   interpreterPrompt,
   ITERATIONS_PER_PLAY,
   magpieRun,
+  modeFor,
   parseIntent,
   requestFromIntent,
   scanRun,
@@ -23,6 +25,7 @@ import {
   type Intent,
   type InterpreterContext,
   type MagpieRun,
+  type Mode,
   type Selector,
   type SimRequest,
 } from './magpie'
@@ -259,6 +262,13 @@ type Plan = {
   /** For a game: the turn chosen, and how many it has. */
   turn?: number
   turns?: number
+  /** Simmed, or its endgame solved (the bag empty). */
+  mode: Mode
+}
+
+/** What the pane says while a plan runs. */
+function planStatus(plan: Plan): string {
+  return plan.mode === 'endgame' ? `Solving the endgame of ${plan.label}` : `Simulating ${plan.label}: ${SIM_SHAPE}`
 }
 
 /** What the pane shows, for `/magpie next turn` and `/magpie csw`: the
@@ -290,7 +300,7 @@ async function execute($: EngineInterface, where: Magpie, label: string, run: Ma
 async function planSim($: EngineInterface, request: SimRequest): Promise<{ plan: Plan } | { candidates: GcgPosition[] }> {
   const already = await read($, running)
   if (already !== '') {
-    throw new Error(`a sim of ${already} is still running`)
+    throw new Error(`still running: ${already}`)
   }
   const { resolved, lexicon: knownLexicon } = await resolveRequest($, request)
   const where = await findMagpie($)
@@ -299,6 +309,7 @@ async function planSim($: EngineInterface, request: SimRequest): Promise<{ plan:
   let label = request.label
   let turn: number | undefined
   let turns: number | undefined
+  let mode: Mode = resolved.kind === 'cgp' ? modeFor(cgpUnseen(resolved.cgp)) : 'sim'
   if (resolved.kind === 'gcg') {
     // Every position of the game, to find the one asked for. The scan also
     // learns whether the GCG names its lexicon (one MAGPIE fetched is
@@ -325,10 +336,11 @@ async function planSim($: EngineInterface, request: SimRequest): Promise<{ plan:
     } else {
       goto = String(choice.position.events)
       turn = choice.position.turn
+      mode = modeFor(choice.position.unseen)
       label = `${label} turn ${turn}`
     }
   }
-  const plan: Plan = { request, resolved, goto, label, where, threadCount: await threads($) }
+  const plan: Plan = { request, resolved, goto, label, where, threadCount: await threads($), mode }
   if (lexicon !== undefined) {
     plan.lexicon = lexicon
   }
@@ -363,17 +375,18 @@ function candidateLines(candidates: readonly GcgPosition[]): string[] {
 async function runPlan($: EngineInterface, plan: Plan): Promise<Sim> {
   const already = await read($, running)
   if (already !== '') {
-    throw new Error(`a sim of ${already} is still running`)
+    throw new Error(`still running: ${already}`)
   }
-  await update($, running, () => plan.label)
+  await update($, running, () => planStatus(plan))
   await update($, runError, () => '')
   try {
     const started = Date.now()
     const magpie = async (accelerated: Accelerators) => {
-      const run = magpieRun(plan.resolved, { lexicon: plan.lexicon, goto: plan.goto }, plan.threadCount, accelerated)
+      const run = magpieRun(plan.resolved, { lexicon: plan.lexicon, goto: plan.goto }, plan.threadCount, accelerated, plan.mode)
       return { run, ...(await execute($, plan.where, plan.label, run)) }
     }
-    const tried = await accelerators($, plan.where, plan.lexicon)
+    // The endgame solver has no use for them.
+    const tried = plan.mode === 'endgame' ? { rit: false, wit: false } : await accelerators($, plan.where, plan.lexicon)
     let { run, result, said } = await magpie(tried)
     if ((tried.rit || tried.wit) && /not found for data type (rack|word) info table/.test(said)) {
       ;({ run, result } = await magpie({ rit: false, wit: false }))
@@ -436,6 +449,25 @@ const COLUMNS: readonly Column[] = [
   { title: 'OpSc', cell: play => play.plies[0]?.score.toFixed(1) ?? '' },
   { title: 'OpBn%', cell: play => play.plies[0]?.bingoPct.toFixed(1) ?? '' },
 ]
+
+// An endgame's result as players write it: W+20 a win by 20, L-10 a loss by
+// 10, T=0 a tie.
+export function resultText(result: number | undefined): string {
+  if (result === undefined) {
+    return ''
+  }
+  return result > 0 ? `W+${result}` : result < 0 ? `L${result}` : 'T=0'
+}
+
+// An endgame's table: the final spread, what the line nets, and the rest of
+// the line.
+const ENDGAME_COLUMNS: readonly Column[] = [
+  { title: 'Play', sort: 'play', isLeft: true, isCompact: true, cell: play => play.id },
+  { title: 'Sc', sort: 'score', isCompact: true, cell: play => String(play.score) },
+  { title: 'Result', sort: 'result', isCompact: true, cell: play => resultText(play.result) },
+  { title: 'Net', sort: 'net', isCompact: true, cell: play => (play.net === undefined ? '' : `${play.net > 0 ? '+' : ''}${play.net}`) },
+  { title: 'Then', isLeft: true, cell: play => play.line ?? '' },
+]
 // The selection marker and the sim's rank, before the columns.
 const RANK_WIDTH = 5
 
@@ -452,7 +484,13 @@ export type TableLayout = {
   tiles?: { labelWidth: number; slots: number }
 }
 
-export function tableLayout(plays: readonly Play[], isCompact: boolean, isTiled = false): TableLayout {
+export function tableLayout(
+  plays: readonly Play[],
+  isCompact: boolean,
+  isTiled = false,
+  kind: Sim['kind'] = 'sim',
+): TableLayout {
+  const kindColumns = kind === 'endgame' ? ENDGAME_COLUMNS : COLUMNS
   const spelled = plays.map(playTiles)
   const tiles = isTiled
     ? {
@@ -460,7 +498,7 @@ export function tableLayout(plays: readonly Play[], isCompact: boolean, isTiled 
         slots: Math.max(1, ...spelled.map(play => play.tiles.length)),
       }
     : undefined
-  const columns = (isCompact ? COLUMNS.filter(column => column.isCompact) : COLUMNS).map(column => ({
+  const columns = (isCompact ? kindColumns.filter(column => column.isCompact) : kindColumns).map(column => ({
     column,
     width: Math.max(
       column.title.length + (column.sort === undefined ? 0 : 1),
@@ -485,6 +523,10 @@ function sortValue(play: Play, key: SortKey): number {
       return play.staticEquity
     case 'iterations':
       return play.iterations
+    case 'result':
+      return play.result ?? 0
+    case 'net':
+      return play.net ?? 0
     case 'play':
       return 0
   }
@@ -546,14 +588,26 @@ export function summaryLine(sim: Sim): string {
   const parts = [
     sim.label !== '' && sim.label !== sim.rack ? `${sim.label}, rack ${sim.rack}` : sim.rack,
     sim.lexicon,
-    `${sim.plies} ${sim.plies === 1 ? 'ply' : 'plies'}`,
-    `${sim.iterations.toLocaleString('en-US')} iters in ${sim.seconds.toFixed(1)} s`,
+    ...(sim.kind === 'endgame'
+      ? [`endgame solved ${sim.plies} plies deep in ${sim.seconds.toFixed(1)} s`]
+      : [
+          `${sim.plies} ${sim.plies === 1 ? 'ply' : 'plies'}`,
+          `${sim.iterations.toLocaleString('en-US')} iters in ${sim.seconds.toFixed(1)} s`,
+        ]),
   ]
   return parts.filter(part => part !== '').join(' · ')
 }
 
 /** The top plays as the simulate tool reports them to the model. */
 export function reportLines(sim: Sim, count: number): string[] {
+  if (sim.kind === 'endgame') {
+    return sim.plays
+      .slice(0, count)
+      .map(
+        play =>
+          `${play.rank}. ${play.id}: ${play.score} pts, ${resultText(play.result)}, net ${play.net ?? 0}${play.line === '' || play.line === undefined ? '' : `; then ${play.line}`}`,
+      )
+  }
   return sim.plays
     .slice(0, count)
     .map(
@@ -881,7 +935,7 @@ export const register: Register = (on, options) => {
     // results, or what went wrong.
     void runPlan($, plan).catch(() => undefined)
     return {
-      text: `${opened}. ${found.message ?? `Simulating ${plan.label}`}: ${SIM_SHAPE}. The pane fills in when it finishes.`,
+      text: `${opened}. ${found.message ?? planStatus(plan)}. The pane fills in when it finishes.`,
     }
   })
 
@@ -981,7 +1035,7 @@ export const register: Register = (on, options) => {
       const error = await read($, runError)
       const status =
         runningLabel !== '' ? (
-          <Text color="yellow" wrap="truncate-end">{`Simulating ${runningLabel}: ${SIM_SHAPE}…`}</Text>
+          <Text color="yellow" wrap="truncate-end">{`${runningLabel}…`}</Text>
         ) : error !== '' ? (
           <Text color="red" wrap="wrap">{`The sim failed: ${error}`}</Text>
         ) : null
@@ -1015,8 +1069,9 @@ export const register: Register = (on, options) => {
 
       // The full table where it fits, else its main columns; the board
       // beside it where both fit, else above.
-      const fullLayout = tableLayout(sim.plays, false, isTiled)
-      const layout = e.props.bodyColumns < fullLayout.width ? tableLayout(sim.plays, true, isTiled) : fullLayout
+      const fullLayout = tableLayout(sim.plays, false, isTiled, sim.kind)
+      const layout =
+        e.props.bodyColumns < fullLayout.width ? tableLayout(sim.plays, true, isTiled, sim.kind) : fullLayout
       const isWide = e.props.bodyColumns >= BOARD_COLUMNS + 2 + layout.width
       const besideBoard = isWide ? 0 : BOARD_ROWS + 1
       const statusRows = status === null ? 0 : 1

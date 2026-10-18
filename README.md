@@ -60,7 +60,9 @@ A game's position left out is its latest with a player to move. When a turn, rac
 position, `/magpie` lists them and asks which. Asking Claude ("sim AEINRST after 8G VAV") works too: the mod gives the
 model a `simulate` tool that takes the same request as fields and reports the top plays back.
 
-Each sim is 50 plays × 20,000 iterations at 2 plies, with WMP, and RIT and WIT where the lexicon has them.
+Each sim is 50 plays × 20,000 iterations at 2 plies, with WMP, and RIT and WIT where the lexicon has them. With the bag
+empty (seven or fewer tiles unseen) MAGPIE solves the endgame instead, and the table shows its 50 best first moves: Result
+the final spread (`W+20`, `L-10`, `T=0`), Net what the line nets, Then the rest of the line.
 
 - Needs MAGPIE installed in `~/magpie` (`bin/magpie` and `data/`), or wherever `magpieDir` says
   (`claude plugin configure magpie-sim@olaugh-mods`; empty runs the `magpie` on PATH). From a MAGPIE checkout, after
