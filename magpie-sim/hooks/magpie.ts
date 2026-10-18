@@ -38,7 +38,8 @@ export type Selector =
   | { kind: 'rack'; rack: string }
   /** The position this word was played from. */
   | { kind: 'word'; word: string }
-  /** The position right after this word was played (where, if given). */
+  /** The rack its player held next, at their following turn, after this
+   * word was played (where, if given). */
   | { kind: 'after'; word: string; coordinate?: string }
   /** Letters that could be a rack or a word. */
   | { kind: 'letters'; letters: string }
@@ -71,7 +72,13 @@ const KEYWORDS: Readonly<Record<string, Selector['kind']>> = {
   before: 'word',
   event: 'goto',
 }
-const FILLER = new Set(['at', 'on', 'the', 'with', 'of', 'for'])
+// Words that say nothing about which position: "the turn where I played
+// VODKA" is VODKA. `turn` and `move` are filler too unless a number follows.
+const FILLER = new Set([
+  'at', 'on', 'in', 'the', 'a', 'an', 'with', 'of', 'for',
+  'where', 'when', 'was', 'played', 'i', 'my', 'his', 'her', 'their', 'position',
+])
+const TURN_NUMBER = /^#?\d+$/
 // Between the moves after `after`.
 const SEPARATORS = new Set(['then', 'and'])
 const COORDINATE = /^(?:\d{1,2}[A-Oa-o]|[A-Oa-o]\d{1,2})$/
@@ -100,9 +107,11 @@ export function classifyPosition(text: string): Position {
   const trimmed = text.trim()
   if (/^https?:\/\//i.test(trimmed)) {
     const url = new URL(trimmed)
+    // A viewer's `#13#` is for the page (gameFragmentEvents), not the fetch.
+    url.hash = ''
     return GAME_SITES.test(url.hostname) || /\.gcg$/i.test(url.pathname)
-      ? { kind: 'gcg', source: trimmed }
-      : { kind: 'url', url: trimmed }
+      ? { kind: 'gcg', source: url.href }
+      : { kind: 'url', url: url.href }
   }
   if (isCgp(trimmed)) {
     return { kind: 'cgp', cgp: trimmed }
@@ -124,8 +133,22 @@ export function positionLabel(text: string): string {
   if (isCgp(trimmed)) {
     return 'CGP'
   }
-  const path = /^https?:\/\//i.test(trimmed) ? new URL(trimmed).pathname : trimmed
-  return /[/]/.test(path) ? (path.split('/').filter(part => part !== '').pop() ?? trimmed) : trimmed
+  if (/^https?:\/\//i.test(trimmed)) {
+    const url = new URL(trimmed)
+    const annotated = url.searchParams.get('u')
+    if (/cross-tables\.com$/i.test(url.hostname) && annotated !== null) {
+      return `cross-tables ${annotated}`
+    }
+    return url.pathname.split('/').filter(part => part !== '').pop() ?? url.hostname
+  }
+  return /[/]/.test(trimmed) ? (trimmed.split('/').filter(part => part !== '').pop() ?? trimmed) : trimmed
+}
+
+/** The events played that a game viewer's link shows: cross-tables's
+ * annotated viewer writes its move counter, which counts what MAGPIE's
+ * `goto` does, as `#13#`. */
+export function gameFragmentEvents(text: string): string | undefined {
+  return /^https?:\/\/[^#]*cross-tables\.com\/[^#]*#(\d+)#?$/i.exec(text.trim())?.[1]
 }
 
 function selector(kind: Selector['kind'] | undefined, value: string): Selector {
@@ -163,24 +186,45 @@ function selector(kind: Selector['kind'] | undefined, value: string): Selector {
 
 export type Qualifiers = { lexicon?: string; at?: Selector; after?: PlacedMove[] }
 
+/** A word as typed, without quotes, end punctuation or a possessive:
+ * `"VODKA's"` is VODKA. */
+function cleanToken(token: string): string {
+  return token.replace(/^["'“‘]+|["'”’!:;]+$/g, '').replace(/['’]s$/i, '')
+}
+
 /** Reads the words after a position: a lexicon (CSW24); for a rack, the
  * moves played before it (`after 8G VAV, 9F ...`); for a GCG, which
- * position, as `12`, `turn 12`, `DEEILRV`, `rack DEEILRV`, `before
- * SILVERED`, `after SILVERED` or `event 23`. Filler words (`at`, `on`,
- * `the`) are skipped. */
-export function parseQualifiers(tokens: readonly string[]): Qualifiers {
+ * position, as `12`, `turn 12`, `DEEILRV`, `rack DEEILRV`, `VODKA` or `the
+ * VODKA turn` (where it was played), `before VODKA` (the same), `after
+ * VODKA` (its player's next rack) or `event 23`. Filler words (`at`, `the`,
+ * `where`, `played`) are skipped. */
+export function parseQualifiers(rawTokens: readonly string[]): Qualifiers {
+  const tokens = rawTokens.map(cleanToken).filter(token => token !== '')
   const qualifiers: Qualifiers = {}
+  const isFiller = (token: string | undefined) => FILLER.has((token ?? '').toLowerCase())
+  // The next token that says something, at or after `from`.
+  const meaningfulFrom = (from: number) => {
+    let at = from
+    while (at < tokens.length && isFiller(tokens[at])) {
+      at++
+    }
+    return at
+  }
   for (let index = 0; index < tokens.length; index++) {
     const token = tokens[index] ?? ''
     const lower = token.toLowerCase()
-    if (FILLER.has(lower)) {
+    if (isFiller(token)) {
       continue
     }
     if (LEXICON.test(token)) {
       qualifiers.lexicon = token.toUpperCase()
       continue
     }
+    if ((lower === 'turn' || lower === 'move') && !TURN_NUMBER.test(tokens[meaningfulFrom(index + 1)] ?? '')) {
+      continue
+    }
     if (lower === 'after') {
+      index = meaningfulFrom(index + 1) - 1
       const moves: PlacedMove[] = []
       while (COORDINATE.test(tokens[index + 1] ?? '')) {
         const coordinate = (tokens[index + 1] ?? '').toUpperCase()
@@ -209,7 +253,10 @@ export function parseQualifiers(tokens: readonly string[]): Qualifiers {
       continue
     }
     const kind = KEYWORDS[lower]
-    const value = kind === undefined ? token : tokens[++index]
+    if (kind !== undefined) {
+      index = meaningfulFrom(index + 1)
+    }
+    const value = kind === undefined ? token : tokens[index]
     if (value === undefined) {
       throw new Error(`"${token}" needs something after it: turn 12, rack DEEILRV, before SILVERED`)
     }
@@ -265,6 +312,11 @@ export function parseArgs(args: string): SimRequest {
     request.at = { kind: 'after', word: move.word.replace(/[().]/g, '').toUpperCase(), coordinate: move.coordinate }
   } else if (at !== undefined) {
     request.at = at
+  } else {
+    const events = gameFragmentEvents(first)
+    if (events !== undefined) {
+      request.at = { kind: 'goto', goto: events }
+    }
   }
   return request
 }
@@ -409,7 +461,9 @@ export type Choice =
 /** The position a selector names among a GCG's, or what stands in the way. */
 export function choosePosition(positions: readonly GcgPosition[], at: Selector | undefined): Choice {
   if (at?.kind === 'goto') {
-    return { goto: at.goto }
+    // Named by its turn when a player moves from there.
+    const position = positions.find(candidate => String(candidate.events) === at.goto)
+    return position === undefined ? { goto: at.goto } : { position }
   }
   if (positions.length === 0) {
     return { error: 'no position in the game has a player to move with a known rack' }
@@ -430,14 +484,17 @@ export function choosePosition(positions: readonly GcgPosition[], at: Selector |
       const move = placement(position.move)
       return move?.word === at.word && (at.coordinate === undefined || move.coordinate === at.coordinate)
     })
-    // The position each was played into: the game's next one.
-    const following = played.flatMap(position => positions.filter(next => next.turn === position.turn + 1))
+    // The rack its player held next: their following turn.
+    const following = played.flatMap(position => {
+      const next = positions.find(later => later.turn > position.turn && later.player === position.player)
+      return next === undefined ? [] : [next]
+    })
     if (following.length === 0) {
       return {
         error:
-          played.length === 0
+          played[0] === undefined
             ? `no turn of the game played ${at.word}`
-            : `${at.word} was the game's last move; nothing is left to sim after it`,
+            : `${at.word} was ${played[0].player}'s last turn; no rack came after it`,
       }
     }
     return following.length === 1 ? { position: following[0] as GcgPosition } : { candidates: following }

@@ -586,7 +586,7 @@ export const register: Register = (on, options) => {
             at: {
               type: 'string',
               description:
-                "For a rack: the moves played before it, `after 8G VAV, 9F .IE` (an all-lowercase word is plain tiles). For a GCG, which position: a turn number (1 is the game's first move), a rack the player to move held, or a word that was played (the position it was played from); `turn 12`, `rack DEEILRV`, `before SILVERED`, `after SILVERED` say which kind. Left out: the latest position with a player to move. When it fits more than one position the tool lists them instead of running: ask the person which.",
+                "For a rack: the moves played before it, `after 8G VAV, 9F .IE` (an all-lowercase word is plain tiles). For a GCG, which position: a turn number (1 is the game's first move), a rack the player to move held, or a word: `VODKA`, `the VODKA turn` and `before VODKA` are the rack VODKA was played from, `after VODKA` that player's next rack; `turn 12`, `rack DEEILRV`, `event 23` (MAGPIE's goto) say which kind. A cross-tables viewer link's `#13#` picks its position. Left out: the latest position with a player to move. When it fits more than one position the tool lists them instead of running: ask the person which.",
             },
           },
           required: ['position'],

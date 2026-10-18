@@ -98,7 +98,8 @@ test('/magpie arguments: a position, then a lexicon, and for a GCG which positio
   // Which position means nothing beside a rack or a CGP.
   expect(() => parseArgs('ADOPQRR 12')).toThrow()
   expect(() => parseArgs('game.gcg turn 12 rack AB')).toThrow()
-  expect(() => parseArgs('game.gcg turn')).toThrow()
+  // A bare "turn" says nothing; the latest position stands.
+  expect(parseArgs('game.gcg turn').at).toBe(undefined)
   expect(() => parseArgs('game.gcg turn 0')).toThrow()
   expect(() => parseArgs('')).toThrow()
 })
@@ -384,14 +385,52 @@ test('a rack after the moves played before it', () => {
   expect(() => parseArgs(`${CGP} after 8g vav`)).toThrow()
 })
 
-test('in a game, after a move is the position it was played into', () => {
+test('before a word is the rack it was played from; after it, its player’s next rack', () => {
   const positions = gcgPositions(SCAN_PHONY)
   const events = (choice: Choice) => ('position' in choice ? choice.position.events : choice)
   expect(parseArgs('game.gcg after lea').at).toEqual({ kind: 'after', word: 'LEA' })
   expect(parseArgs('game.gcg after 6b vokda').at).toEqual({ kind: 'after', word: 'VOKDA', coordinate: '6B' })
-  expect(events(choosePosition(positions, { kind: 'after', word: 'LEA' }))).toBe(9)
-  // After the phony, past its withdrawal: HastyBot to move.
-  expect(events(choosePosition(positions, { kind: 'after', word: 'VOKDA', coordinate: '6B' }))).toBe(11)
+  expect(events(choosePosition(positions, { kind: 'word', word: 'LEA' }))).toBe(8)
+  // HastyBot played LEA on turn 2; their next rack is turn 4's.
+  expect(events(choosePosition(positions, { kind: 'after', word: 'LEA' }))).toBe(11)
+  // After the phony came off, RightBehindYou's next rack (turn 5).
+  expect(events(choosePosition(positions, { kind: 'after', word: 'VOKDA', coordinate: '6B' }))).toBe(12)
   expect('error' in choosePosition(positions, { kind: 'after', word: 'VOKDA', coordinate: '7B' })).toBe(true)
-  expect(events(choosePosition(positions, { kind: 'after', word: 'VODKA' }))).toBe(13)
+  // RightBehindYou has no turn after VODKA in this stretch, nor Josh after
+  // the game's last move.
+  const lastTurn = choosePosition(positions, { kind: 'after', word: 'VODKA' })
+  expect('error' in lastTurn ? lastTurn.error : lastTurn).toBe("VODKA was RightBehindYou's last turn; no rack came after it")
+  expect('error' in choosePosition(gcgPositions(SCAN_ENDING), { kind: 'after', word: 'SILVERED' })).toBe(true)
+})
+
+test('words around the position are skipped', () => {
+  const at = (args: string) => parseArgs(`game.gcg ${args}`).at
+  expect(at('the VODKA turn')).toEqual({ kind: 'letters', letters: 'VODKA' })
+  expect(at("VODKA's turn")).toEqual({ kind: 'letters', letters: 'VODKA' })
+  expect(at('the turn where VODKA was played')).toEqual({ kind: 'letters', letters: 'VODKA' })
+  expect(at('when I played VODKA')).toEqual({ kind: 'letters', letters: 'VODKA' })
+  expect(at('before the VODKA turn')).toEqual({ kind: 'word', word: 'VODKA' })
+  expect(at('after the VODKA turn')).toEqual({ kind: 'after', word: 'VODKA' })
+  expect(at('move 3')).toEqual({ kind: 'turn', turn: 3 })
+  expect(at('the turn #3')).toEqual({ kind: 'turn', turn: 3 })
+  // "The VODKA turn" is where VODKA was played.
+  const positions = gcgPositions(SCAN_PHONY)
+  const choice = choosePosition(positions, { kind: 'letters', letters: 'VODKA' })
+  expect('position' in choice ? choice.position.turn : choice).toBe(5)
+})
+
+test('cross-tables links, and the move their viewer shows', () => {
+  const link = 'https://www.cross-tables.com/annotated.php?u=62161#13#'
+  expect(classifyPosition(link)).toEqual({ kind: 'gcg', source: 'https://www.cross-tables.com/annotated.php?u=62161' })
+  expect(parseArgs(link).label).toBe('cross-tables 62161')
+  expect(parseArgs(link).at).toEqual({ kind: 'goto', goto: '13' })
+  expect(parseArgs('https://www.cross-tables.com/annotated.php?u=62161').at).toBe(undefined)
+  // Words after the link say which position instead.
+  expect(parseArgs(`${link} turn 5`).at).toEqual({ kind: 'turn', turn: 5 })
+  // A viewer's position is named by its turn when a player moves from it.
+  const positions = gcgPositions(SCAN_PHONY)
+  const choice = choosePosition(positions, { kind: 'goto', goto: '11' })
+  expect('position' in choice ? choice.position.turn : choice).toBe(4)
+  // After event 10 the phony is still on the board: no turn starts there.
+  expect(choosePosition(positions, { kind: 'goto', goto: '10' })).toEqual({ goto: '10' })
 })

@@ -45,13 +45,20 @@ static equity, iterations or A–Z (again to flip).
 /magpie AEINRST after 8g vav        a rack after the moves before it; an all-lowercase word is plain tiles, VaV has a blank
 /magpie 15/15/.../15 AEINRST/ 0/0 0 lex CSW24;    a CGP
 /magpie ~/games/round3.gcg 12       a GCG (path, URL, woogles.io or cross-tables.com link) at a turn
+/magpie https://www.cross-tables.com/annotated.php?u=62161#13#    the move the cross-tables viewer link shows
 ```
 
-For a GCG, which position: a turn number (`12`, `turn 12`; 1 is the game's first move), a rack the player to move held
-(`DEEILRV`, `rack DEEILRV`), a word played from it (`SILVERED`, `before SILVERED`), `after SILVERED` (the position it
-was played into), or `event 23` (MAGPIE's `goto`). Left out, the latest position with a player to move. When it fits
-more than one position, `/magpie` lists them and asks which. Asking Claude ("sim AEINRST after 8G VAV") works too: the
-mod gives the model a `simulate` tool that reads the same words and reports the top plays back.
+For a GCG, which position:
+
+- a turn number: `12`, `turn 12`; 1 is the game's first move
+- a rack the player to move held: `DEEILRV`, `rack DEEILRV`
+- a word: `VODKA`, `the VODKA turn` or `before VODKA` is the rack VODKA was played from; `after VODKA` is that player's
+  next rack
+- `event 23`: MAGPIE's `goto`, events played; a cross-tables viewer link's `#13#` means the same
+
+Words around these (`the`, `turn`, `where`, `played`) are skipped. Left out, the latest position with a player to move.
+When it fits more than one position, `/magpie` lists them and asks which. Asking Claude ("sim AEINRST after 8G VAV")
+works too: the mod gives the model a `simulate` tool that reads the same words and reports the top plays back.
 
 Each sim is 50 plays × 20,000 iterations at 2 plies, with WMP, and RIT and WIT where the lexicon has them.
 
