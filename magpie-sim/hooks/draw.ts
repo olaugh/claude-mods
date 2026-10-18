@@ -92,19 +92,31 @@ export function boardPicture(font: Font, board: readonly string[] | null, rack: 
 // terminal columns.
 const ROW_TILE_GAP = 4
 export const ROW_TILE_STEP = SQUARE + ROW_TILE_GAP
+// Above and below the tiles, so a selected row's colour runs round them.
+const ROW_TILE_MARGIN = 3
+export const ROW_TILE_HEIGHT = SQUARE + 2 * ROW_TILE_MARGIN
 
 /** A play's tiles in a row, `slots` wide so every row of the table lines
  * up: the tiles it plays bright, as the board's preview draws them, the
- * board's own it plays through darker, blanks grey; the rest left clear. */
-export function tilesPicture(font: Font, tiles: readonly { letter: string; isThrough: boolean }[], slots: number): Picture {
+ * board's own it plays through darker, blanks grey; the rest left clear,
+ * or filled with `background` (the selected row's). */
+export function tilesPicture(
+  font: Font,
+  tiles: readonly { letter: string; isThrough: boolean }[],
+  slots: number,
+  background?: Rgb,
+): Picture {
   const picture: Picture = {
     width: slots * ROW_TILE_STEP,
-    height: SQUARE,
-    pixels: new Uint8Array(slots * ROW_TILE_STEP * SQUARE * 4),
+    height: ROW_TILE_HEIGHT,
+    pixels: new Uint8Array(slots * ROW_TILE_STEP * ROW_TILE_HEIGHT * 4),
   }
   const canvas = pixelCanvas(picture, font)
+  if (background !== undefined) {
+    canvas.rect(0, 0, picture.width, picture.height, background)
+  }
   for (const [index, { letter, isThrough }] of tiles.entries()) {
-    drawTile(canvas, font, index * ROW_TILE_STEP + ROW_TILE_GAP / 2, 0, {
+    drawTile(canvas, font, index * ROW_TILE_STEP + ROW_TILE_GAP / 2, ROW_TILE_MARGIN, {
       letter,
       ...tileColors(letter, isThrough ? TILE_BG : PREVIEW_BG),
       isBold: !isThrough,

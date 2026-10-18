@@ -17,6 +17,9 @@ export const PREVIEW_BG: Rgb = [
   (TILE_FG[1] + BACKGROUND[1]) / 2,
   (TILE_FG[2] + BACKGROUND[2]) / 2,
 ]
+// Behind the table's selected row, its text and its tiles' picture alike:
+// slate blue, apart from the tiles' greens.
+export const SELECTED_ROW: Rgb = [56, 82, 120]
 // A spent rack tile: grey on the background.
 export const GHOST_FG: Rgb = [102, 102, 102]
 // A blank's letter, on whatever tile it is (tui/theme.c's blank_tile_fg).

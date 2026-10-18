@@ -228,15 +228,30 @@ test('a tall pane lists the top 15 plays, its pictures inside the tree budget', 
   const images = await ui.findAll({ type: 'Image' })
   expect(images.filter(image => image.key?.startsWith('tiles-'))).toHaveLength(15)
   expect(await ui.find({ type: 'Text', text: /top 15 of 50/ })).toBeDefined()
-  // Every picture's decoded bytes, as Claude Code counts them.
+  // Every picture's decoded bytes, as Claude Code counts them; the selected
+  // row's text backgrounds and its tiles' picture.
   let bytes = 0
+  const selectedBackgrounds = new Set<string>()
+  const tilePngs = new Map<string, Uint8Array>()
+  type Node = {
+    type?: string
+    key?: string
+    props?: { key?: string; backgroundColor?: string; source?: { png?: string; rgba?: string } }
+    children?: unknown[]
+  }
   const walk = (node: unknown) => {
     if (typeof node !== 'object' || node === null) {
       return
     }
-    const { type, props, children } = node as { type?: string; props?: { source?: { png?: string; rgba?: string } }; children?: unknown[] }
+    const { type, props, children } = node as Node
     const source = type === 'Image' ? (props?.source?.png ?? props?.source?.rgba) : undefined
     bytes += source === undefined ? 0 : Math.floor((source.length * 3) / 4)
+    if (type === 'Image' && props?.source?.png !== undefined && props.key?.startsWith('tiles-') === true) {
+      tilePngs.set(props.key, Uint8Array.fromBase64(props.source.png))
+    }
+    if (type === 'Text' && props?.backgroundColor !== undefined) {
+      selectedBackgrounds.add(props.backgroundColor)
+    }
     for (const child of children ?? []) {
       walk(child)
     }
@@ -244,5 +259,9 @@ test('a tall pane lists the top 15 plays, its pictures inside the tree budget', 
   walk(tree)
   expect(bytes).toBeGreaterThan(1_000_000)
   expect(bytes).toBeLessThan(MAX_IMAGE_SOURCE)
+  // The selected row (the first) on one colour, its tiles' picture with an
+  // alpha channel (colour type 6, IHDR byte 25) so the others stay clear.
+  expect([...selectedBackgrounds]).toEqual(['#385278'])
+  expect(tilePngs.get('tiles-1A ETAERIO')?.[25]).toBe(6)
   await ui.unmount()
 })

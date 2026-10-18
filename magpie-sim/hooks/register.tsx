@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { SortKey } from '../types'
 import { cardPicture } from './card'
-import { boardPicture, ROW_TILE_STEP, tilesPicture, type Picture } from './draw'
+import { boardPicture, ROW_TILE_HEIGHT, ROW_TILE_STEP, tilesPicture, type Picture } from './draw'
 import {
   cgpUnseen,
   applyMove,
@@ -56,7 +56,7 @@ import {
 import { encodePng } from './png'
 import { describePlay, parseBoard, parseSim, playTiles, resultText, type Play, type Sim } from './sim'
 import { boardSvg } from './svg'
-import { PICTURE_HEIGHT, PICTURE_WIDTH, SQUARE } from './theme'
+import { PICTURE_HEIGHT, PICTURE_WIDTH, SELECTED_ROW } from './theme'
 import { parseFont, type Font } from './truetype'
 
 const PLUGIN = 'magpie-sim'
@@ -666,9 +666,10 @@ export function reportLines(sim: Sim, count: number): string[] {
 }
 
 // A picture as a PNG's base64: three bytes a pixel, not RGBA's four, as a
-// tree holds at most IMAGE_BUDGET bytes of pictures.
-function pngSource(picture: Picture): string {
-  return encodePng(picture.width, picture.height, picture.pixels).toBase64()
+// tree holds at most IMAGE_BUDGET bytes of pictures; four where its clear
+// pixels must stay clear.
+function pngSource(picture: Picture, hasAlpha = false): string {
+  return encodePng(picture.width, picture.height, picture.pixels, hasAlpha).toBase64()
 }
 
 // The selected play's picture as a PNG, the last few kept: each is about
@@ -728,21 +729,30 @@ async function selectPlay($: EngineInterface, id: string) {
   await update($, selectedId, () => id)
 }
 
-// A row's tiles as a PNG, by play, for the sim loaded now.
+// A row's tiles as a PNG, by play and whether it is selected, for the sim
+// loaded now: just its own tiles, the slots past them spaces of text; clear
+// between the tiles, so the pane shows through, or the selected row's
+// colour, as its text is.
 const rowPictures = new Map<string, string>()
 
-function rowTilesSource(font: Font, play: Play, slots: number) {
-  const key = `${slots}:${play.id}`
+function rowTilesSource(font: Font, play: Play, isSelected: boolean) {
+  const key = `${isSelected ? 'selected' : 'plain'}:${play.id}`
   let png = rowPictures.get(key)
   if (png === undefined) {
-    png = pngSource(tilesPicture(font, playTiles(play).tiles, slots))
+    const { tiles } = playTiles(play)
+    png = pngSource(tilesPicture(font, tiles, tiles.length, isSelected ? SELECTED_ROW : undefined), true)
     rowPictures.set(key, png)
   }
   return { png }
 }
 
-// About how many bytes a PNG of `width` by `height` takes, stored as it is.
-const pngBytes = (width: number, height: number) => (1 + width * 3) * height + PNG_OVERHEAD
+// The selected row's colour as text takes it, and the text on it.
+const SELECTED_BACKGROUND = `#${SELECTED_ROW.map(channel => channel.toString(16).padStart(2, '0')).join('')}`
+const SELECTED_TEXT = '#ffffff'
+
+// About how many bytes a PNG of `width` by `height` takes, stored as it is,
+// with `channels` bytes a pixel.
+const pngBytes = (width: number, height: number, channels: number) => (1 + width * channels) * height + PNG_OVERHEAD
 
 async function sortBy($: EngineInterface, key: SortKey) {
   if ((await read($, sortKey)) === key) {
@@ -1536,11 +1546,12 @@ export const register: Register = (on, options) => {
       }
       // The terminal spells each play in tiles, as pictures, while they and
       // the board's fit the tree's budget; else in letters.
-      const tiledSlots = Math.max(1, ...listed.map(play => playTiles(play).tiles.length))
+      const rowBytes = listed.reduce(
+        (total, play) => total + pngBytes(playTiles(play).tiles.length * ROW_TILE_STEP, ROW_TILE_HEIGHT, 4),
+        0,
+      )
       const isTiled =
-        e.surface === 'terminal' &&
-        font !== null &&
-        pngBytes(PICTURE_WIDTH, PICTURE_HEIGHT) + listed.length * pngBytes(tiledSlots * ROW_TILE_STEP, SQUARE) <= IMAGE_BUDGET
+        e.surface === 'terminal' && font !== null && pngBytes(PICTURE_WIDTH, PICTURE_HEIGHT, 3) + rowBytes <= IMAGE_BUDGET
 
       // The full table where it fits, else its main columns; the board
       // beside it where both fit, else above.
@@ -1598,31 +1609,45 @@ export const register: Register = (on, options) => {
       // Each row is a button that puts its play on the board; a tiled row's
       // tiles sit between its two halves, a picture no click reaches.
       const TileImage = e.surface === 'terminal' ? $.ui.resolve(e).Image : undefined
+      // The selected row on one colour, its tiles' picture painted the same.
+      const rowText = (text: string, isSelected: boolean) =>
+        isSelected ? (
+          <Text backgroundColor={SELECTED_BACKGROUND} color={SELECTED_TEXT}>
+            {text}
+          </Text>
+        ) : (
+          <Text>{text}</Text>
+        )
       const rows = shown.map(play => {
         const isSelected = play.id === selected.id
         const pick = () => selectPlay($, play.id)
         if (layout.tiles === undefined || font === null || TileImage === undefined) {
           return (
             <Button key={`pick-${play.id}`} plain onPress={pick}>
-              <Text inverse={isSelected}>{rowLine(layout, play, isSelected)}</Text>
+              {rowText(rowLine(layout, play, isSelected), isSelected)}
             </Button>
           )
         }
         const parts = rowParts(layout, play, isSelected)
+        const tileCount = playTiles(play).tiles.length
+        // The slots past its tiles are spaces, on the row's colour.
+        const after = ' '.repeat(TILE_COLUMNS * (layout.tiles.slots - tileCount)) + parts.after
         return (
           <Box key={`row-${play.id}`} flexDirection="row">
             <Button key={`pick-${play.id}`} plain onPress={pick}>
-              <Text inverse={isSelected}>{parts.before}</Text>
+              {rowText(parts.before, isSelected)}
             </Button>
-            <TileImage
-              key={`tiles-${play.id}`}
-              source={rowTilesSource(font, play, layout.tiles.slots)}
-              columns={TILE_COLUMNS * layout.tiles.slots}
-              rows={1}
-              alt={play.id}
-            />
+            {tileCount === 0 ? null : (
+              <TileImage
+                key={`tiles-${play.id}`}
+                source={rowTilesSource(font, play, isSelected)}
+                columns={TILE_COLUMNS * tileCount}
+                rows={1}
+                alt={play.id}
+              />
+            )}
             <Button key={`pick-${play.id}-numbers`} plain onPress={pick}>
-              <Text inverse={isSelected}>{parts.after}</Text>
+              {rowText(after, isSelected)}
             </Button>
           </Box>
         )

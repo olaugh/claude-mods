@@ -1,6 +1,7 @@
 // Writes a picture as a PNG with nothing compressed: the plugin's environment
 // has no deflate, so the image data goes in stored blocks, and macOS's sips
-// compresses the file afterwards. Truecolour, 8 bits a channel, no alpha.
+// compresses the file afterwards. Truecolour, 8 bits a channel, alpha kept
+// when asked.
 
 const SIGNATURE = [137, 80, 78, 71, 13, 10, 26, 10]
 // The most a stored deflate block holds.
@@ -68,21 +69,23 @@ function zlibStored(data: Uint8Array): Uint8Array {
   return out
 }
 
-/** The PNG of an RGBA picture, its alpha dropped. */
-export function encodePng(width: number, height: number, rgba: Uint8Array): Uint8Array {
-  const rowBytes = 1 + width * 3
+/** The PNG of an RGBA picture, its alpha dropped unless `hasAlpha`. */
+export function encodePng(width: number, height: number, rgba: Uint8Array, hasAlpha = false): Uint8Array {
+  const channels = hasAlpha ? 4 : 3
+  const rowBytes = 1 + width * channels
   const raw = new Uint8Array(rowBytes * height)
   for (let row = 0; row < height; row++) {
-    // Filter type 0 (none), then the row's RGB.
+    // Filter type 0 (none), then the row's pixels.
     for (let col = 0; col < width; col++) {
       const from = (row * width + col) * 4
-      const to = row * rowBytes + 1 + col * 3
-      raw[to] = rgba[from] ?? 0
-      raw[to + 1] = rgba[from + 1] ?? 0
-      raw[to + 2] = rgba[from + 2] ?? 0
+      const to = row * rowBytes + 1 + col * channels
+      for (let channel = 0; channel < channels; channel++) {
+        raw[to + channel] = rgba[from + channel] ?? 0
+      }
     }
   }
-  const header = new Uint8Array([...uint32(width), ...uint32(height), 8, 2, 0, 0, 0])
+  // Colour type 6 is truecolour with alpha, 2 without.
+  const header = new Uint8Array([...uint32(width), ...uint32(height), 8, hasAlpha ? 6 : 2, 0, 0, 0])
   const parts = [new Uint8Array(SIGNATURE), chunk('IHDR', header), chunk('IDAT', zlibStored(raw)), chunk('IEND', new Uint8Array())]
   const out = new Uint8Array(parts.reduce((total, part) => total + part.length, 0))
   let at = 0
