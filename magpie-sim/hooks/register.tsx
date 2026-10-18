@@ -54,7 +54,7 @@ import {
   type SimRequest,
 } from './magpie'
 import { encodePng } from './png'
-import { describePlay, parseBoard, parseSim, playName, playTiles, resultText, type Play, type Sim } from './sim'
+import { describePlay, latestTable, parseBoard, parseSim, playName, playTiles, resultText, type Play, type Sim } from './sim'
 import { boardSvg } from './svg'
 import { SELECTED_ROW } from './theme'
 import { parseFont, type Font } from './truetype'
@@ -70,8 +70,9 @@ const INTERPRETER_MAX_TOKENS = 400
 const INTERPRETER_TIMEOUT_MS = 30_000
 // The pane's top plays the interpreter is told of.
 const TOP_PLAYS_TOLD = 8
-// The plays the pane lists, the sim's top ones.
-const PLAYS_LISTED = 15
+// The plays the pane lists, the sim's top ones: as many as stand beside the
+// board, its BOARD_ROWS less the table's chrome and the running status.
+const PLAYS_LISTED = 20
 // The most bytes of pictures one tree may hold (Claude Code refuses more
 // than 2 MiB), less a margin.
 const IMAGE_BUDGET = 2_000_000
@@ -161,6 +162,10 @@ async function simPath($: EngineInterface): Promise<string> {
   return file === '' ? `${$.plugin.root}/${DEFAULT_SIM_FILE}` : file
 }
 
+// The position the pictures kept are of: they hold while a sim streams in
+// and only its numbers change, and go when the board or rack does.
+let picturesOf = ''
+
 // The sim the pane shows: the last run's, else the file the show tool named,
 // else the one the mod ships. Parsed once each; a failed read is tried again
 // at the next draw.
@@ -168,10 +173,17 @@ export async function loadSim($: EngineInterface): Promise<Sim> {
   const text = await read($, simText)
   const source = text !== '' ? text : await simPath($)
   if (simLoad?.source !== source) {
-    pictures.clear()
-    columnPictures.clear()
-    drawingAhead = null
-    const sim = text !== '' ? Promise.resolve().then(() => parseSim(text)) : $.fs.read(source).then(parseSim)
+    const parsed = text !== '' ? Promise.resolve().then(() => parseSim(text)) : $.fs.read(source).then(parseSim)
+    const sim = parsed.then(loaded => {
+      const position = `${loaded.lexicon}|${loaded.rack}|${(loaded.board ?? []).join('/')}`
+      if (position !== picturesOf) {
+        pictures.clear()
+        columnPictures.clear()
+        drawingAhead = null
+        picturesOf = position
+      }
+      return loaded
+    })
     simLoad = { source, sim }
     sim.catch(() => {
       if (simLoad?.sim === sim) {
@@ -342,17 +354,59 @@ async function readCurrent($: EngineInterface): Promise<Current | undefined> {
   return json === '' ? undefined : (JSON.parse(json) as Current)
 }
 
+const couldNotRun = (where: Magpie, error: unknown) =>
+  new Error(
+    `could not run ${where.binary} (${error instanceof Error ? error.message : String(error)}); install MAGPIE there, or set the mod's MAGPIE directory with \`claude plugin configure magpie-sim@olaugh-mods\``,
+  )
+
 async function execute($: EngineInterface, where: Magpie, label: string, run: MagpieRun) {
   note(`running ${label}: ${where.binary} ${run.args.join(' ')} <<< ${run.stdin.trim().split('\n').slice(0, 3).join('; ')}`)
   let result
   try {
     result = await $.process.run([where.binary, ...run.args], { cwd: where.cwd, stdin: run.stdin, timeoutMs: RUN_TIMEOUT_MS })
   } catch (error) {
-    throw new Error(
-      `could not run ${where.binary} (${error instanceof Error ? error.message : String(error)}); install MAGPIE there, or set the mod's MAGPIE directory with \`claude plugin configure magpie-sim@olaugh-mods\``,
-    )
+    throw couldNotRun(where, error)
   }
   return { result, said: result.stdout + result.stderr }
+}
+
+/** A sim run as `execute` runs one, but streamed: each results table MAGPIE
+ * prints as it goes is handed to `onTable` when it ends, so the pane fills
+ * in while the sim runs. A run past RUN_TIMEOUT_MS is ended. */
+async function executeStreaming(
+  $: EngineInterface,
+  where: Magpie,
+  label: string,
+  run: MagpieRun,
+  onTable: (table: string) => Promise<void>,
+) {
+  note(`streaming ${label}: ${where.binary} ${run.args.join(' ')} <<< ${run.stdin.trim().split('\n').slice(0, 3).join('; ')}`)
+  const started = Date.now()
+  let stdout = ''
+  let stderr = ''
+  let handed = 0
+  try {
+    // Leaving the loop ends the child.
+    for await (const { stream, text } of $.process.spawn({ argv: [where.binary, ...run.args], cwd: where.cwd, input: run.stdin })) {
+      if (stream === 'stderr') {
+        stderr += text
+      } else {
+        stdout += text
+        const table = latestTable(stdout)
+        if (table !== undefined && table.count > handed) {
+          handed = table.count
+          await onTable(table.text)
+        }
+      }
+      if (Date.now() - started > RUN_TIMEOUT_MS) {
+        stderr += `\nended after ${RUN_TIMEOUT_MS / 1000} s`
+        break
+      }
+    }
+  } catch (error) {
+    throw couldNotRun(where, error)
+  }
+  return { result: { stdout, stderr }, said: stdout + stderr }
 }
 
 /** Works out what to sim, before anything runs: the position read or
@@ -442,9 +496,25 @@ async function runPlan($: EngineInterface, plan: Plan): Promise<Sim> {
   await update($, runError, () => '')
   try {
     const started = Date.now()
+    const headerOf = (run: MagpieRun) =>
+      [run.lexicon === '' ? '' : `# lexicon ${run.lexicon}`, `# label ${plan.label}`].filter(line => line !== '').join('\n')
+    // A sim's tables as they come: the pane shows each, from the first on
+    // with its own selection and scroll.
+    let tables = 0
+    const showTable = async (run: MagpieRun, table: string) => {
+      await update($, simText, () => `${headerOf(run)}\n${table}`)
+      if (++tables === 1) {
+        await update($, selectedId, () => '')
+        await update($, windowTop, () => 0)
+      }
+    }
     const magpie = async (accelerated: Accelerators) => {
       const run = magpieRun(plan.resolved, { lexicon: plan.lexicon, goto: plan.goto }, plan.threadCount, accelerated, plan.mode)
-      return { run, ...(await execute($, plan.where, plan.label, run)) }
+      const ran =
+        plan.mode === 'sim'
+          ? await executeStreaming($, plan.where, plan.label, run, table => showTable(run, table))
+          : await execute($, plan.where, plan.label, run)
+      return { run, result: ran.result, said: ran.said }
     }
     // The endgame solver has no use for them.
     const tried = plan.mode === 'endgame' ? { rit: false, wit: false } : await accelerators($, plan.where, plan.lexicon)
@@ -452,8 +522,8 @@ async function runPlan($: EngineInterface, plan: Plan): Promise<Sim> {
     if ((tried.rit || tried.wit) && /not found for data type (rack|word) info table/.test(said)) {
       ;({ run, result } = await magpie({ rit: false, wit: false }))
     }
-    const header = [run.lexicon === '' ? '' : `# lexicon ${run.lexicon}`, `# label ${plan.label}`]
-    const text = `${header.filter(line => line !== '').join('\n')}\n${result.stdout}`
+    // A streamed sim is kept as its last table, the one it finished on.
+    const text = `${headerOf(run)}\n${latestTable(result.stdout)?.text ?? result.stdout}`
     let sim: Sim
     try {
       sim = parseSim(text)
@@ -474,8 +544,11 @@ async function runPlan($: EngineInterface, plan: Plan): Promise<Sim> {
       shown.turns = plan.turns
     }
     await update($, current, () => JSON.stringify(shown))
-    await update($, selectedId, () => '')
-    await update($, windowTop, () => 0)
+    // A row picked while the sim streamed in stays picked.
+    if (tables === 0) {
+      await update($, selectedId, () => '')
+      await update($, windowTop, () => 0)
+    }
     return sim
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)

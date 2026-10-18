@@ -13,6 +13,9 @@ export const ITERATIONS_PER_PLAY = 5000
 export const SIM_PLIES = 4
 // Long enough never to cut the iterations short.
 const SIM_TIME_LIMIT_SECONDS = 3600
+// How often MAGPIE prints the table as a sim runs, which the pane streams:
+// at this, a table each 14,000 iterations or so, 18 a sim, twice a second.
+const SIM_PRINT_FREQUENCY = 1000
 // More `next`s than any game has events; the ones past its end only say so.
 const SCAN_STEPS = 150
 // The tiles a rack holds.
@@ -487,6 +490,7 @@ export function simOptions(lexicon: string | undefined, threads: number, acceler
     // Round robin with no stopping rule: every play gets its share.
     '-sr', 'rr', '-threshold', 'none', '-scondition', 'none',
     '-tlim', String(SIM_TIME_LIMIT_SECONDS),
+    '-pfrequency', String(SIM_PRINT_FREQUENCY),
     '-threads', String(threads),
     '-hr', 'false',
     ...ASCII_BOARD,

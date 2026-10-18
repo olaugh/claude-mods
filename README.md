@@ -36,10 +36,10 @@ joined) and turns into a check mark for 1.5 s, like the Claude desktop app. Besi
 ### magpie-sim
 
 Sims a crossword position in [MAGPIE](https://github.com/jvc56/MAGPIE) and shows the results in a pane: a picture of
-the board with the selected play on it, beside a table of the sim's top 15 plays (win%, equity, static equity, iterations, the
+the board with the selected play on it, beside a table of the sim's top 20 plays (win%, equity, static equity, iterations, the
 opponent's mean reply and bingo rate), each play spelled in tiles: bright green for the tiles it plays, darker green for
 the board's own it plays through, blanks' letters grey. Click a row to put its play on the board; click a heading to
-sort those 15 by it (again to flip); the wheel scrolls the rows.
+sort those 20 by it (again to flip); the wheel scrolls the rows.
 
 Say what to sim after `/magpie` in your own words. A model (Haiku) reads them into a request, knowing what the pane
 shows and which lexicons MAGPIE has; the rest is MAGPIE's:
@@ -79,7 +79,7 @@ A game's position left out is its latest with a player to move. When a turn, rac
 position, `/magpie` lists them and asks which. Asking Claude ("sim AEINRST after 8G VAV") works too: the mod gives the
 model a `simulate` tool that takes the same request as fields and reports the top plays back.
 
-Each sim is 50 plays × 5,000 iterations at 4 plies, with WMP, and RIT and WIT where the lexicon has them. With the bag
+The table fills in while a sim runs, its numbers and order updating about twice a second. Each sim is 50 plays × 5,000 iterations at 4 plies, with WMP, and RIT and WIT where the lexicon has them. With the bag
 empty (seven or fewer tiles unseen) MAGPIE solves the endgame instead, and the table shows its 50 best first moves: Result
 the final spread (`W+20`, `L-10`, `T=0`), Net what the line nets, Then the rest of the line.
 

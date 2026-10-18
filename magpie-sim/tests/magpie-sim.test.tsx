@@ -192,7 +192,7 @@ for (const [surface, bodyColumns] of [
 }
 
 // Fifty plays of seven tiles, as a sim of 50 plays prints them: a tall pane
-// lists the top 15, and its pictures stay inside what one tree may hold.
+// lists the top 20, and its pictures stay inside what one tree may hold.
 const FIFTY_TEXT = [
   '# lexicon NWL23',
   ...Array.from({ length: 50 }, (_, index) => {
@@ -206,7 +206,7 @@ const FIFTY_TEXT = [
 ].join('\n')
 const MAX_IMAGE_SOURCE = 2 * 1024 * 1024
 
-test('a tall pane lists the top 15 plays, its pictures inside the tree budget', async ($, on) => {
+test('a tall pane lists the top 20 plays, its pictures inside the tree budget', async ($, on) => {
   const clock = mock.clock(on)
   on('ui.panes', () => ({ value: [] }) as never)
   on('session.surfaces', () => ({ value: ['terminal'] }) as never)
@@ -229,11 +229,11 @@ test('a tall pane lists the top 15 plays, its pictures inside the tree budget', 
     },
   })
   const tree = await ui.drawn()
-  // Two pictures, the board and the tiles of all 15 rows in one.
+  // Two pictures, the board and the tiles of all 20 rows in one.
   expect(await ui.findAll({ type: 'Image' })).toHaveLength(2)
   const buttons = await ui.findAll({ type: 'Button' })
-  expect(buttons.filter(button => /^pick-\d+[A-D] ETAERIO$/.test(button.key ?? ''))).toHaveLength(15)
-  expect(await ui.find({ type: 'Text', text: /top 15 of 50/ })).toBeDefined()
+  expect(buttons.filter(button => /^pick-\d+[A-D] ETAERIO$/.test(button.key ?? ''))).toHaveLength(20)
+  expect(await ui.find({ type: 'Text', text: /top 20 of 50/ })).toBeDefined()
   // Every picture's decoded bytes, as Claude Code counts them; the selected
   // row's text backgrounds and the tile column's picture.
   let bytes = 0
@@ -269,12 +269,12 @@ test('a tall pane lists the top 15 plays, its pictures inside the tree budget', 
   // a play, 42 pixels each (IHDR height at byte 20), with an alpha channel
   // (colour type 6, byte 25) so the rows not selected stay clear.
   expect([...selectedBackgrounds]).toEqual(['#385278'])
-  expect(tiles?.rows).toBe(15)
-  expect(new DataView((tiles?.png ?? new Uint8Array(32)).buffer).getUint32(20)).toBe(15 * 42)
+  expect(tiles?.rows).toBe(20)
+  expect(new DataView((tiles?.png ?? new Uint8Array(32)).buffer).getUint32(20)).toBe(20 * 42)
   expect(tiles?.png[25]).toBe(6)
   // The other listed plays' pictures drawn ahead, a timer tick each.
   await clock.advance(1000)
   const why = await $.command.run({ command: 'magpie', args: 'why' } as never)
-  expect(why.text).toContain('drew 14 pictures ahead')
+  expect(why.text).toContain('drew 19 pictures ahead')
   await ui.unmount()
 })

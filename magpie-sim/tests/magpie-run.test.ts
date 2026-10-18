@@ -309,28 +309,46 @@ test('positions are named short', () => {
   expect(positionLabel(CGP)).toBe('CGP')
 })
 
+// A streamed run (a sim) answered as a run is: what `answer` gives, in two
+// pieces cut mid-line, as a pipe may cut it.
+function answerSpawns(
+  on: On,
+  runs: { argv: readonly string[]; stdin?: string; cwd?: string }[],
+  answer: (argv: readonly string[], stdin?: string) => string,
+) {
+  on('process.spawn', async function* (_$: unknown, e: { argv: readonly string[]; input?: string; cwd?: string }) {
+    runs.push({ argv: e.argv, stdin: e.input, cwd: e.cwd })
+    const stdout = answer(e.argv, e.input)
+    const cut = Math.floor(stdout.length / 2)
+    for (const text of [stdout.slice(0, cut), stdout.slice(cut)].filter(piece => piece !== '')) {
+      yield { stream: 'stdout' as const, text }
+    }
+    return { value: { code: 0, signal: null } }
+  } as never)
+}
+
 // Stands in for the host: HOME, the core count, the lexicons, MAGPIE (whose
 // scan of a GCG and whose sim answer from fixtures), and the model reading
 // /magpie's words, which answers `replies` in order.
 function fakeHost(on: On, scan = SCAN_ENDING, replies: string[] = [], endgame = '') {
   const runs: { argv: readonly string[]; stdin?: string; cwd?: string }[] = []
+  const answer = (argv: readonly string[], stdin?: string) =>
+    argv[0] === 'printenv'
+      ? '/home/test\n'
+      : argv[0] === 'getconf'
+        ? '12\n'
+        : stdin?.includes('next\n')
+          ? scan
+          : stdin?.includes('endgame\n')
+            ? endgame
+            : CGP_OUTPUT
   on('process.run', (_$, e) => {
     runs.push({ argv: e.argv, stdin: e.init?.stdin, cwd: e.init?.cwd })
-    const command = e.argv[0]
-    const stdout =
-      command === 'printenv'
-        ? '/home/test\n'
-        : command === 'getconf'
-          ? '12\n'
-          : e.init?.stdin?.includes('next\n')
-            ? scan
-            : e.init?.stdin?.includes('endgame\n')
-              ? endgame
-              : CGP_OUTPUT
     return {
-      value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+      value: { exitCode: 0, stdout: answer(e.argv, e.init?.stdin), stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
     } as never
   })
+  answerSpawns(on, runs, answer)
   on('fs.exists', () => ({ value: true }) as never)
   on('fs.list', () => ({ value: ['CSW24.kwg', 'CSW24.klv2', 'NWL23.kwg'].map(name => ({ name, kind: 'file', size: 1 })) }) as never)
   on('ui.open', () => ({ value: { isPlaced: true } }) as never)
@@ -921,22 +939,23 @@ test("a play intent's moves, read from the interpreter", () => {
 test('/magpie plays on: each move found on the board, then the new rack simmed', async ($, on) => {
   const runs: { argv: readonly string[]; stdin?: string }[] = []
   const shownRack = 'AEINRST'
+  const answer = (argv: readonly string[], stdin = '') =>
+    argv[0] === 'printenv'
+      ? '/home/test\n'
+      : argv[0] === 'getconf'
+        ? '12\n'
+        : stdin.includes(`rack ${shownRack}\ngenerate`)
+          ? GENERATED_INERTIAS
+          : stdin.includes('rack ZG\ngenerate')
+            ? GENERATED_ZAG
+            : // The sims: AEINRST's shows INERTIAS on top, as the pane did.
+              `\n   A B C D E F G H I J K L M N O   > Player 1  ${shownRack}  0\n\n1:  H8 (I)NERTIAS  77 - 61.50 0.2 73.50 0.5 77.00 5000 30.0 20.0 10.0 40.0 20.0 10.0\n2:  H3 INERT(I)AS  59 - 50.00 0.2 50.00 0.5 59.00 5000 30.0 20.0 10.0 40.0 20.0 10.0\n\nShowing 2 of 2 plays\nShowing 2 of 4 plies\n`
   on('process.run', (_$, e) => {
     runs.push({ argv: e.argv, stdin: e.init?.stdin })
-    const stdin = e.init?.stdin ?? ''
-    const stdout =
-      e.argv[0] === 'printenv'
-        ? '/home/test\n'
-        : e.argv[0] === 'getconf'
-          ? '12\n'
-          : stdin.includes(`rack ${shownRack}\ngenerate`)
-            ? GENERATED_INERTIAS
-            : stdin.includes('rack ZG\ngenerate')
-              ? GENERATED_ZAG
-              : // The sims: AEINRST's shows INERTIAS on top, as the pane did.
-                `\n   A B C D E F G H I J K L M N O   > Player 1  ${shownRack}  0\n\n1:  H8 (I)NERTIAS  77 - 61.50 0.2 73.50 0.5 77.00 5000 30.0 20.0 10.0 40.0 20.0 10.0\n2:  H3 INERT(I)AS  59 - 50.00 0.2 50.00 0.5 59.00 5000 30.0 20.0 10.0 40.0 20.0 10.0\n\nShowing 2 of 2 plays\nShowing 2 of 4 plies\n`
+    const stdout = answer(e.argv, e.init?.stdin)
     return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } as never
   })
+  answerSpawns(on, runs, answer)
   on('fs.exists', () => ({ value: true }) as never)
   on('fs.list', () => ({ value: [{ name: 'CSW24.kwg', kind: 'file', size: 1 }] }) as never)
   on('ui.open', () => ({ value: { isPlaced: true } }) as never)
@@ -1110,4 +1129,56 @@ test('/magpie says PIZZAZZ cannot have been played, and refuses a rack the bag c
   const zz = await $.command.run({ command: 'magpie', args: 'zzaeirt' } as never)
   expect(zz.text).toBe('ZZAEIRT cannot be the correct rack: only 1 Z is left. What is the rack?')
   expect(runs.some(run => run.stdin?.includes('gsimulate'))).toBe(false)
+})
+
+// A sim as MAGPIE streams it with -pfrequency: the board, a table while it
+// runs, then the table it finished on, each ending with its Nps: line.
+const STREAM_BOARD = '\n   A B C D E F G H I J K L M N O   > Player 1  AEINRST  0\n\n'
+const streamTable = (iterations: number, status: string, winPct: string) =>
+  `1:  8D RETAINS  70 - ${winPct} 0.2 30.00 0.5 70.00 ${iterations / 2} 30.0 20.0 10.0 40.0 20.0 10.0\n` +
+  `2:  8H RETAINS  70 - 40.00 0.2 20.00 0.5 70.00 ${iterations / 2} 30.0 20.0 10.0 40.0 20.0 10.0\n\n` +
+  `Showing 2 of 2 plays\nShowing 2 of 4 plies\n\nIters:     ${iterations}\nTime:      1.50 seconds\nStatus:    ${status}\n \nNps:       9000\n`
+
+test('a sim streams into the pane, a table at a time, and keeps the last', async ($, on) => {
+  const runs: { argv: readonly string[]; stdin?: string }[] = []
+  const seen: (string | undefined)[] = []
+  // The pane, mounted before the sim runs: the stream's stub reads it.
+  let ui: { find: (query: { type: 'Text'; text: RegExp }) => Promise<{ text?: string } | undefined> } | undefined
+  on('process.run', (_$, e) => {
+    runs.push({ argv: e.argv, stdin: e.init?.stdin })
+    const stdout = e.argv[0] === 'printenv' ? '/home/test\n' : e.argv[0] === 'getconf' ? '12\n' : ''
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } as never
+  })
+  // Between the tables, what the pane's summary says.
+  const summary = async () => (await ui?.find({ type: 'Text', text: /iters in/ }))?.text
+  on('process.spawn', async function* (_$: unknown, e: { argv: readonly string[]; input?: string; cwd?: string }) {
+    runs.push({ argv: e.argv, stdin: e.input })
+    yield { stream: 'stdout' as const, text: STREAM_BOARD + streamTable(1000, 'Running', '55.00').slice(0, 40) }
+    yield { stream: 'stdout' as const, text: streamTable(1000, 'Running', '55.00').slice(40) }
+    seen.push(await summary())
+    yield { stream: 'stdout' as const, text: streamTable(2000, 'Finished (max iterations reached)', '57.50') }
+    seen.push(await summary())
+    return { value: { code: 0, signal: null } }
+  } as never)
+  on('fs.exists', () => ({ value: true }) as never)
+  on('fs.list', () => ({ value: [{ name: 'CSW24.kwg', kind: 'file', size: 1 }] }) as never)
+  on('fs.read', (_$, e) => (e.as === 'bytes' ? { value: { base64: fixtureFont().toBase64() } } : { deny: 'no file' }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.blit', () => ({ value: {} }) as never)
+  const mounted = await $.ui.mount({
+    plugin: 'magpie-sim',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'magpie-results',
+    props: { title: 'MAGPIE sim', isFocused: true, bodyColumns: 160, placement: 'inline', scroll: { offset: 0, bodyRows: 40 }, view: {} },
+  })
+  ui = mounted
+  const result = JSON.stringify(await $.tool.call({ tool: 'mcp__magpie-sim__simulate', position: 'AEINRST' } as never))
+  // MAGPIE asked to print as it goes; the pane showed each table as it ended.
+  expect(runs.find(run => run.stdin?.includes('gsimulate'))?.argv.join(' ')).toContain('-pfrequency 1000')
+  expect(seen[0]).toContain('1,000 iters in 1.5 s')
+  expect(seen[1]).toContain('2,000 iters in 1.5 s')
+  expect(result).toContain('1. 8D RETAINS: 70 pts, win 57.50%')
+  expect((await mounted.find({ type: 'Text', text: /iters in/ }))?.text).toContain('2,000 iters')
+  await mounted.unmount()
 })

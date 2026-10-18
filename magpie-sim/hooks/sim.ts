@@ -417,3 +417,23 @@ export function resultText(result: number | undefined): string {
   }
   return result > 0 ? `W+${result}` : result < 0 ? `L${result}` : 'T=0'
 }
+
+/** The latest whole results table in a sim's output so far, as parseSim
+ * reads it: MAGPIE, asked to print as it goes (`-pfrequency`), prints the
+ * board, then a table each so often, each ending with its `Nps:` line; the
+ * board goes before the latest. `count` is how many tables have ended;
+ * undefined before the first has. */
+export function latestTable(output: string): { text: string; count: number } | undefined {
+  const ends = [...output.matchAll(/^Nps:.*$/gm)].map(match => match.index + match[0].length)
+  const end = ends[ends.length - 1]
+  if (end === undefined) {
+    return undefined
+  }
+  const start = ends[ends.length - 2] ?? 0
+  const table = output.slice(start, end)
+  if (start === 0) {
+    return { text: table, count: ends.length }
+  }
+  const firstRow = output.search(/^\d+:\s/m)
+  return { text: `${firstRow < 0 ? '' : output.slice(0, firstRow)}${table.replace(/^\n/, '')}`, count: ends.length }
+}
