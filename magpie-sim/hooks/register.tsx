@@ -53,6 +53,9 @@ const FONT_FILE = 'assets/FiraCodeNerdFontMono-Regular.ttf'
 const DEFAULT_SIM_FILE = 'sims/ADOPQRR-CSW24.txt'
 // Plays the simulate tool lists for the model; the pane shows them all.
 const PLAYS_REPORTED = 10
+// How long after a command its picture's prompt goes: past the command's own
+// turn.
+const PROMPT_DELAY_MS = 100
 
 // The terminal picture's box in cells. Cells are about twice as tall as they
 // are wide, so 44 x 24 keeps the 596 x 638 picture's tiles near square.
@@ -727,9 +730,9 @@ function cardSubtitle(sim: Sim): string {
   return summaryLine({ ...sim, label: '' })
 }
 
-/** The picture of what the pane shows (or of `sim`) as a PNG file, sent to
- * the person, as their phone shows a file and no pane. Its path, or why not. */
-async function sendPicture($: EngineInterface, given?: Sim): Promise<string> {
+/** The picture of what the pane shows (or of `sim`) as a PNG file, for a
+ * phone, which shows a file and no pane: its path and a caption. */
+async function makePicture($: EngineInterface, given?: Sim): Promise<{ file: string; caption: string }> {
   const sim = given ?? (await loadSim($))
   const id = await read($, selectedId)
   const shown = sim.plays.find(play => play.id === id) ?? sim.plays[0]
@@ -751,15 +754,26 @@ async function sendPicture($: EngineInterface, given?: Sim): Promise<string> {
   // Stored uncompressed (no deflate here); sips writes it compressed.
   const squeezed = await $.process.run(['sips', '-s', 'format', 'png', raw, '--out', path]).catch(() => undefined)
   const file = squeezed?.exitCode === 0 ? path : raw
-  await $.tool.call({
-    tool: 'SendUserFile',
-    files: [file],
-    caption: `${sim.label || sim.rack}: ${sim.kind === 'endgame' ? 'the endgame solved' : 'the top plays'}`,
-    status: 'normal',
-    display: 'render',
-  } as never)
-  note(`sent ${file}`)
-  return file
+  note(`drew ${file}`)
+  return { file, caption: `${sim.label || sim.rack}: ${sim.kind === 'endgame' ? 'the endgame solved' : 'the top plays'}` }
+}
+
+/** What has Claude send a picture: a file card reaches the phone only as a
+ * SendUserFile call of the conversation's own, which a plugin's
+ * $.tool.call is not. */
+function sendInstruction({ file, caption }: { file: string; caption: string }): string {
+  return `Send the person this picture with SendUserFile (display "render", caption "${caption}"), as their phone shows no pane: ${file}`
+}
+
+/** The picture sent from outside a turn (a /magpie from the phone): a prompt
+ * for Claude to send it, its own short turn once the session is idle. The
+ * engine refuses a prompt from inside a command's hook, which holds the turn
+ * it would wait on, so it goes from a timer of its own. */
+async function sendPicture($: EngineInterface, given?: Sim): Promise<void> {
+  const text = sendInstruction(await makePicture($, given))
+  $.clock.after(PROMPT_DELAY_MS, () => {
+    $.prompt.submit({ text }).catch((error: unknown) => note(`could not ask for the picture: ${String(error)}`))
+  })
 }
 
 let lexicaList: Promise<string[]> | null = null
@@ -1045,12 +1059,12 @@ export const register: Register = (on, options) => {
       return { deny: `${PLUGIN}: the sim of ${plan.label} failed: ${error instanceof Error ? error.message : String(error)}` }
     }
     let pictureLine = 'If the pane waits undrawn, the person can type /magpie to open it.'
+    // The caller is in a turn: it sends the picture itself.
     if (input.picture === true || lastPromptOrigin === 'bridge') {
       try {
-        await sendPicture($, sim)
-        pictureLine = 'A picture of the board and the top plays was sent to the person.'
+        pictureLine = sendInstruction(await makePicture($, sim))
       } catch (error) {
-        pictureLine = `The picture could not be sent: ${error instanceof Error ? error.message : String(error)}`
+        pictureLine = `The picture could not be drawn: ${error instanceof Error ? error.message : String(error)}`
       }
     }
     return {

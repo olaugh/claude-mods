@@ -1,5 +1,5 @@
 import type { On } from 'claude-code'
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
 import {
   canonicalWord,
@@ -613,39 +613,45 @@ test('a PNG of stored blocks: signature, header, and every row', () => {
   expect(png.length).toBe(8 + 25 + (12 + 2 + 5 + raw + 4) + 12)
 })
 
-// A picture's sending: the folder from TMPDIR, the PNG decoded there, sips,
-// then SendUserFile with the compressed file.
+// A picture's making: the folder from TMPDIR, the PNG decoded there, sips;
+// and the prompts the mod queues for Claude to send it.
 function fakePictures(on: On) {
-  const sent: unknown[] = []
+  const prompts: string[] = []
   on('fs.read', (_$, e) => (e.as === 'bytes' ? { value: { base64: fixtureFont().toBase64() } } : undefined) as never)
-  on('tool.call', { tool: 'SendUserFile' }, (_$, e) => {
-    sent.push(e)
-    return { result: 'sent' } as never
+  on('prompt.submit', (_$, e) => {
+    prompts.push(e.text)
+    return { drop: 'the test keeps it' } as never
   })
-  return sent
+  return prompts
 }
 
-test('the simulate tool sends a picture when asked', async ($, on) => {
+const PICTURE_FILE = /\/home\/test\/magpie-sim\/[A-Za-z0-9-]+-\d+\.png/
+
+test('the simulate tool draws a picture and tells Claude to send it', async ($, on) => {
   const runs = fakeHost(on)
-  const sent = fakePictures(on)
-  const result = await $.tool.call({ tool: 'mcp__magpie-sim__simulate', position: CGP, picture: true } as never)
-  expect(JSON.stringify(result)).toContain('A picture of the board and the top plays was sent to the person.')
+  fakePictures(on)
+  const result = JSON.stringify(await $.tool.call({ tool: 'mcp__magpie-sim__simulate', position: CGP, picture: true } as never))
+  expect(result).toContain('Send the person this picture with SendUserFile (display \\"render\\"')
+  expect(result).toMatch(PICTURE_FILE)
   const decode = runs.find(run => run.argv[0] === 'sh')
   expect(decode?.argv.slice(-2)[0]).toBe('/home/test/magpie-sim')
   expect(decode?.stdin?.startsWith(encodePng(1, 1, new Uint8Array(4)).toBase64().slice(0, 8))).toBe(true)
   expect(runs.some(run => run.argv[0] === 'sips')).toBe(true)
-  const [file] = (sent[0] as { files: string[] }).files
-  expect(file).toMatch(/^\/home\/test\/magpie-sim\/CGP-\d+\.png$/)
-  expect((sent[0] as { display: string }).display).toBe('render')
 })
 
-test('/magpie can send a picture of what the pane shows', async ($, on) => {
+test('/magpie picture asks Claude, in a prompt, to send a picture of what the pane shows', async ($, on) => {
   fakeHost(on, SCAN_ENDING, ['{"action":"picture"}', '{"action":"picture"}'])
-  const sent = fakePictures(on)
+  const prompts = fakePictures(on)
+  const clock = mock.clock(on)
   const before = await $.command.run({ command: 'magpie', args: 'send it to my phone' } as never)
   expect(before.text).toContain('nothing to show yet')
   await $.tool.call({ tool: 'mcp__magpie-sim__simulate', position: 'AEINRST' } as never)
   const after = await $.command.run({ command: 'magpie', args: 'send it to my phone' } as never)
   expect(after.text).toBe('Sent a picture of AEINRST.')
-  expect(sent.length).toBe(1)
+  // The prompt goes from a timer, past the command's own turn.
+  expect(prompts.length).toBe(0)
+  await clock.advance(1000)
+  expect(prompts.length).toBe(1)
+  expect(prompts[0]).toMatch(/^Send the person this picture with SendUserFile/)
+  expect(prompts[0]).toMatch(PICTURE_FILE)
 })
