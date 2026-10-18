@@ -68,7 +68,10 @@ the final spread (`W+20`, `L-10`, `T=0`), Net what the line nets, Then the rest 
   (`claude plugin configure magpie-sim@olaugh-mods`; empty runs the `magpie` on PATH). From a MAGPIE checkout, after
   `make release`: `mkdir -p ~/magpie/bin && cp bin/magpie ~/magpie/bin/ && cp -cR data ~/magpie/` (`-c` clones on
   APFS, so the 5 GB of data costs no space until it changes).
-- Terminal: the board is an image, drawn by kitty graphics (kitty, Ghostty). Desktop, VS Code and mobile get SVG.
+- Terminal: the board is an image, drawn by kitty graphics (kitty, Ghostty). Desktop and VS Code get SVG.
+- Phone: the Claude app following a session over Remote Control draws no pane, so a `/magpie` sent from it gets a
+  picture instead (a PNG of the board and the top 10 plays, sent with SendUserFile once the sim finishes), as does
+  asking Claude from the phone. `/magpie picture` (or "send it to my phone") sends one of what the pane shows.
 - The tiles are Fira Code (the MAGPIE TUI's font, OFL, in `assets/`), rasterized by the mod itself.
 
 Agents (Claude sessions) installing or writing mods: see [AGENTS.md](AGENTS.md).

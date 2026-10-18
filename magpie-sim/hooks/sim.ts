@@ -403,3 +403,12 @@ export function playTiles(play: Play): { label: string; tiles: { letter: string;
   }
   return { label, tiles }
 }
+
+/** An endgame's result as players write it: W+20 a win by 20, L-10 a loss
+ * by 10, T=0 a tie. */
+export function resultText(result: number | undefined): string {
+  if (result === undefined) {
+    return ''
+  }
+  return result > 0 ? `W+${result}` : result < 0 ? `L${result}` : 'T=0'
+}

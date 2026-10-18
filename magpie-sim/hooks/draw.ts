@@ -22,7 +22,7 @@ function glyphBitmap(font: Font, char: string, size: number, isBold: boolean): G
   return bitmap
 }
 
-function pixelCanvas(picture: Picture, font: Font): Canvas {
+export function pixelCanvas(picture: Picture, font: Font): Canvas {
   const { width, height, pixels } = picture
   // Coordinates are rounded: a centred shape can land on a half pixel, and a
   // fractional index into the pixels writes nothing.

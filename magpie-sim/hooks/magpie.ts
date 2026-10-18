@@ -98,6 +98,8 @@ export type Intent =
   | { action: 'navigate'; to: Navigation }
   | { action: 'lexicon'; lexicon: string }
   | { action: 'reopen' }
+  /** A picture of what the pane shows, sent to the person (for a phone). */
+  | { action: 'picture' }
   | { action: 'unclear'; question: string }
 
 /** What the interpreter knows of the pane: the analysis it shows, if any,
@@ -142,6 +144,7 @@ The object is one of:
 - {"action":"navigate","to":"next"|"previous"|"first"|"last"} to move to another turn of the game the pane shows ("next turn", "back", "first turn", "end of game").
 - {"action":"lexicon","lexicon":"CSW24"} to analyze what the pane shows again in another lexicon, when the person names only a lexicon.
 - {"action":"reopen"} to show the pane again without a new analysis.
+- {"action":"picture"} to send a picture of what the pane shows ("send it to my phone", "picture", "image").
 - {"action":"unclear","question":"..."} when you cannot tell what they mean; ask one short question.
 
 Words like "sim", "opening", "rack", "the", "turn", "where", "played" only say what the rest is. Words are case-insensitive except as "after" says.
@@ -192,6 +195,8 @@ export function parseIntent(reply: string): Intent {
     }
     case 'reopen':
       return { action: 'reopen' }
+    case 'picture':
+      return { action: 'picture' }
     case 'unclear':
       return { action: 'unclear', question: text('question') ?? 'What should I sim?' }
     case 'sim': {

@@ -2,6 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { SortKey } from '../types'
+import { cardPicture } from './card'
 import { boardPicture, ROW_TILE_STEP, tilesPicture } from './draw'
 import {
   cgpUnseen,
@@ -29,7 +30,8 @@ import {
   type Selector,
   type SimRequest,
 } from './magpie'
-import { describePlay, parseSim, playTiles, type Play, type Sim } from './sim'
+import { encodePng } from './png'
+import { describePlay, parseSim, playTiles, resultText, type Play, type Sim } from './sim'
 import { boardSvg } from './svg'
 import { PICTURE_HEIGHT, PICTURE_WIDTH, SQUARE } from './theme'
 import { parseFont, type Font } from './truetype'
@@ -450,15 +452,6 @@ const COLUMNS: readonly Column[] = [
   { title: 'OpBn%', cell: play => play.plies[0]?.bingoPct.toFixed(1) ?? '' },
 ]
 
-// An endgame's result as players write it: W+20 a win by 20, L-10 a loss by
-// 10, T=0 a tie.
-export function resultText(result: number | undefined): string {
-  if (result === undefined) {
-    return ''
-  }
-  return result > 0 ? `W+${result}` : result < 0 ? `L${result}` : 'T=0'
-}
-
 // An endgame's table: the final spread, what the line nets, and the rest of
 // the line.
 const ENDGAME_COLUMNS: readonly Column[] = [
@@ -716,6 +709,59 @@ async function currentTitle($: EngineInterface): Promise<string> {
 
 const SIM_SHAPE = `${SIM_PLAYS} plays × ${ITERATIONS_PER_PLAY.toLocaleString('en-US')} iterations, ${SIM_PLIES} plies`
 
+// Where the latest prompt came from: `bridge` for the phone (or the web) over
+// Remote Control, where no pane draws, so a sim answers with a picture.
+let lastPromptOrigin = ''
+
+let pictureDirectory: Promise<string> | null = null
+
+// Pictures go in the temporary directory, `magpie-sim` in it.
+function pictureFolder($: EngineInterface): Promise<string> {
+  pictureDirectory ??= $.process
+    .run(['printenv', 'TMPDIR'])
+    .then(({ stdout }) => `${stdout.trim().replace(/\/$/, '') || '/tmp'}/magpie-sim`)
+  return pictureDirectory
+}
+
+function cardSubtitle(sim: Sim): string {
+  return summaryLine({ ...sim, label: '' })
+}
+
+/** The picture of what the pane shows (or of `sim`) as a PNG file, sent to
+ * the person, as their phone shows a file and no pane. Its path, or why not. */
+async function sendPicture($: EngineInterface, given?: Sim): Promise<string> {
+  const sim = given ?? (await loadSim($))
+  const id = await read($, selectedId)
+  const shown = sim.plays.find(play => play.id === id) ?? sim.plays[0]
+  if (shown === undefined) {
+    throw new Error('there are no plays to show')
+  }
+  const picture = cardPicture(await loadFont($), sim, shown, sim.label || sim.rack, cardSubtitle(sim))
+  const directory = await pictureFolder($)
+  const name = `${(sim.label || sim.rack).replace(/[^A-Za-z0-9]+/g, '-').slice(0, 60)}-${Date.now()}`
+  const raw = `${directory}/${name}.raw.png`
+  const path = `${directory}/${name}.png`
+  // The file is binary and $.fs writes text: its base64 decoded on the way.
+  const wrote = await $.process.run(['sh', '-c', 'mkdir -p "$1" && base64 --decode > "$2"', 'magpie-sim', directory, raw], {
+    stdin: encodePng(picture.width, picture.height, picture.pixels).toBase64(),
+  })
+  if (wrote.exitCode !== 0) {
+    throw new Error(`could not write the picture: ${wrote.stderr.trim()}`)
+  }
+  // Stored uncompressed (no deflate here); sips writes it compressed.
+  const squeezed = await $.process.run(['sips', '-s', 'format', 'png', raw, '--out', path]).catch(() => undefined)
+  const file = squeezed?.exitCode === 0 ? path : raw
+  await $.tool.call({
+    tool: 'SendUserFile',
+    files: [file],
+    caption: `${sim.label || sim.rack}: ${sim.kind === 'endgame' ? 'the endgame solved' : 'the top plays'}`,
+    status: 'normal',
+    display: 'render',
+  } as never)
+  note(`sent ${file}`)
+  return file
+}
+
 let lexicaList: Promise<string[]> | null = null
 
 // The lexicons the MAGPIE directory has (its .kwg files); none known for the
@@ -766,13 +812,17 @@ async function interpret($: EngineInterface, text: string): Promise<Intent> {
 async function requestFor(
   $: EngineInterface,
   intent: Intent,
-): Promise<{ request: SimRequest; message?: string } | { answer: string; reopen?: true }> {
+): Promise<{ request: SimRequest; message?: string } | { answer: string; reopen?: true; picture?: true }> {
   const shown = await readCurrent($)
   switch (intent.action) {
     case 'unclear':
       return { answer: intent.question }
     case 'reopen':
       return { answer: 'Opened the MAGPIE sim pane.', reopen: true }
+    case 'picture':
+      return shown === undefined
+        ? { answer: 'There is nothing to show yet: sim a position first.' }
+        : { answer: `Sent a picture of ${shown.label}.`, picture: true }
     case 'navigate': {
       if (shown?.turn === undefined || shown.turns === undefined) {
         return { answer: 'The pane shows no game to move through: sim a GCG first (/magpie <path or URL of a .gcg>).' }
@@ -870,6 +920,11 @@ export const register: Register = (on, options) => {
             },
             letters: { type: 'string', description: 'For a game: letters that could be the rack or the word' },
             event: { type: 'integer', description: "For a game: MAGPIE's goto, the number of events played" },
+            picture: {
+              type: 'boolean',
+              description:
+                'Also send the person a picture of the board and the top plays, as a phone shows no pane: set it when they ask for a picture (it is sent by itself when their message came from the phone over Remote Control)',
+            },
           },
         },
         isDeferred: false,
@@ -891,6 +946,13 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  // Notes where each prompt came from, for the simulate tool: a phone's gets
+  // a picture.
+  on('prompt.submit', ($, e, next) => {
+    lastPromptOrigin = e.origin?.kind ?? ''
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
   on('command.run', { command: 'magpie' }, async ($, e) => {
     const args = e.args.trim()
     if (args === 'why') {
@@ -906,13 +968,22 @@ export const register: Register = (on, options) => {
         ].join('\n'),
       }
     }
+    // The phone (or the web) over Remote Control draws no pane: a picture is
+    // what it can show.
+    const fromPhone = e.origin?.kind === 'bridge'
     let found: Awaited<ReturnType<typeof requestFor>>
     let planned: Awaited<ReturnType<typeof planSim>>
     try {
-      found = args === '' ? { answer: 'Opened the MAGPIE sim pane.', reopen: true } : await requestFor($, await interpret($, args))
+      found =
+        args === ''
+          ? { answer: 'Opened the MAGPIE sim pane.', reopen: true }
+          : await requestFor($, await interpret($, args))
       if ('answer' in found) {
         if (found.reopen === true) {
           await openPane($, await currentTitle($), true)
+        }
+        if (found.picture === true || (fromPhone && found.reopen === true)) {
+          await sendPicture($)
         }
         return { text: found.answer }
       }
@@ -933,9 +1004,11 @@ export const register: Register = (on, options) => {
     const opened = await openPane($, `MAGPIE · ${plan.label}`, true)
     // The sim outlives the command: the pane shows it running, then its
     // results, or what went wrong.
-    void runPlan($, plan).catch(() => undefined)
+    void runPlan($, plan)
+      .then(sim => (fromPhone ? sendPicture($, sim) : undefined))
+      .catch((error: unknown) => note(`${plan.label}: ${String(error)}`))
     return {
-      text: `${opened}. ${found.message ?? planStatus(plan)}. The pane fills in when it finishes.`,
+      text: `${opened}. ${found.message ?? planStatus(plan)}. ${fromPhone ? 'A picture follows' : 'The pane fills in'} when it finishes.`,
     }
   })
 
@@ -971,11 +1044,20 @@ export const register: Register = (on, options) => {
     } catch (error) {
       return { deny: `${PLUGIN}: the sim of ${plan.label} failed: ${error instanceof Error ? error.message : String(error)}` }
     }
+    let pictureLine = 'If the pane waits undrawn, the person can type /magpie to open it.'
+    if (input.picture === true || lastPromptOrigin === 'bridge') {
+      try {
+        await sendPicture($, sim)
+        pictureLine = 'A picture of the board and the top plays was sent to the person.'
+      } catch (error) {
+        pictureLine = `The picture could not be sent: ${error instanceof Error ? error.message : String(error)}`
+      }
+    }
     return {
       result: [
-        `${opened}. ${summaryLine(sim)}, ${sim.plays.length} plays. Top by win%:`,
+        `${opened}. ${summaryLine(sim)}, ${sim.plays.length} plays. Top ${sim.kind === 'endgame' ? 'by the solver' : 'by win%'}:`,
         ...reportLines(sim, PLAYS_REPORTED),
-        'If the pane waits undrawn, the person can type /magpie to open it.',
+        pictureLine,
       ].join('\n'),
     }
   }).catch(($, e, next) => (next.called ? next(e) : { deny: `${PLUGIN}: the sim failed` }))

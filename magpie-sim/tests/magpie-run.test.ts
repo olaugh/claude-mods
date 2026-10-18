@@ -20,8 +20,10 @@ import {
   type Choice,
   type Intent,
 } from '../hooks/magpie'
-import { headerLine, reportLines, resultText, rowLine, tableLayout } from '../hooks/register'
-import { parseSim, placedTiles, rackGhosts } from '../hooks/sim'
+import { headerLine, reportLines, rowLine, tableLayout } from '../hooks/register'
+import { encodePng } from '../hooks/png'
+import { parseSim, placedTiles, rackGhosts, resultText } from '../hooks/sim'
+import { fixtureFont } from './font-fixture'
 
 const CGP = '15/15/15/15/15/15/15/5DROP6/15/15/15/15/15/15/15 AEINRST/AQR 14/0 0 lex CSW24;'
 
@@ -597,4 +599,53 @@ test('with the bag empty the endgame is solved, not simmed', async ($, on) => {
   expect(solve?.stdin).toBe(`load ${XT_GAME}\ngoto 23\nshgame\nendgame\n`)
   expect(solve?.argv.join(' ')).toContain('-etopk 50')
   expect(cgpUnseen(CGP)).toBe(100 - 4 - 7)
+})
+
+test('a PNG of stored blocks: signature, header, and every row', () => {
+  const png = encodePng(2, 3, new Uint8Array(2 * 3 * 4).fill(200))
+  expect([...png.slice(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10])
+  // IHDR: 13 bytes of width, height, 8 bits, truecolour.
+  expect(String.fromCharCode(...png.slice(12, 16))).toBe('IHDR')
+  expect([...png.slice(16, 29)]).toEqual([0, 0, 0, 2, 0, 0, 0, 3, 8, 2, 0, 0, 0])
+  // The rows: 3 of a filter byte and 2 RGB pixels, in one stored block.
+  const raw = 3 * (1 + 2 * 3)
+  expect(String.fromCharCode(...png.slice(37, 41))).toBe('IDAT')
+  expect(png.length).toBe(8 + 25 + (12 + 2 + 5 + raw + 4) + 12)
+})
+
+// A picture's sending: the folder from TMPDIR, the PNG decoded there, sips,
+// then SendUserFile with the compressed file.
+function fakePictures(on: On) {
+  const sent: unknown[] = []
+  on('fs.read', (_$, e) => (e.as === 'bytes' ? { value: { base64: fixtureFont().toBase64() } } : undefined) as never)
+  on('tool.call', { tool: 'SendUserFile' }, (_$, e) => {
+    sent.push(e)
+    return { result: 'sent' } as never
+  })
+  return sent
+}
+
+test('the simulate tool sends a picture when asked', async ($, on) => {
+  const runs = fakeHost(on)
+  const sent = fakePictures(on)
+  const result = await $.tool.call({ tool: 'mcp__magpie-sim__simulate', position: CGP, picture: true } as never)
+  expect(JSON.stringify(result)).toContain('A picture of the board and the top plays was sent to the person.')
+  const decode = runs.find(run => run.argv[0] === 'sh')
+  expect(decode?.argv.slice(-2)[0]).toBe('/home/test/magpie-sim')
+  expect(decode?.stdin?.startsWith(encodePng(1, 1, new Uint8Array(4)).toBase64().slice(0, 8))).toBe(true)
+  expect(runs.some(run => run.argv[0] === 'sips')).toBe(true)
+  const [file] = (sent[0] as { files: string[] }).files
+  expect(file).toMatch(/^\/home\/test\/magpie-sim\/CGP-\d+\.png$/)
+  expect((sent[0] as { display: string }).display).toBe('render')
+})
+
+test('/magpie can send a picture of what the pane shows', async ($, on) => {
+  fakeHost(on, SCAN_ENDING, ['{"action":"picture"}', '{"action":"picture"}'])
+  const sent = fakePictures(on)
+  const before = await $.command.run({ command: 'magpie', args: 'send it to my phone' } as never)
+  expect(before.text).toContain('nothing to show yet')
+  await $.tool.call({ tool: 'mcp__magpie-sim__simulate', position: 'AEINRST' } as never)
+  const after = await $.command.run({ command: 'magpie', args: 'send it to my phone' } as never)
+  expect(after.text).toBe('Sent a picture of AEINRST.')
+  expect(sent.length).toBe(1)
 })
