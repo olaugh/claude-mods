@@ -959,7 +959,7 @@ async function rackProblem($: EngineInterface, plan: Plan): Promise<string | und
   }
   const set = await tileSet($, plan.where, plan.lexicon)
   const missing = set === undefined ? [] : missingTiles(rack, tilesLeft(set, parseBoard(result.stdout.split('\n')) ?? []))
-  return `${rack} cannot be the rack in ${plan.label}: ${missing.length > 0 ? missingText(missing) : 'the bag does not hold its tiles'}.`
+  return `${rack} cannot be the correct rack: ${missing.length > 0 ? missingText(missing) : 'the bag does not hold its tiles'}.`
 }
 
 /** A play intent's moves found on the board in order, each a legal play of
@@ -1141,7 +1141,7 @@ async function resolvePlay(
   if (rack !== '' && set !== undefined) {
     const missing = missingTiles(rack, tilesLeft(set, board))
     if (missing.length > 0) {
-      problem = `${rack} is not possible here: ${missingText(missing)}. What is your rack?`
+      problem = `${rack} cannot be the correct rack: ${missingText(missing)}. What is your rack?`
     }
   }
   if (rack !== '' && problem === undefined && personLeave !== undefined && rackLess(rack, personLeave.leave) === null) {

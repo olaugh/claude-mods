@@ -1012,6 +1012,6 @@ test('/magpie says PIZZAZZ cannot have been played, and refuses a rack the bag c
   const pizzazz = await $.command.run({ command: 'magpie', args: 'opp played pizzazz' } as never)
   expect(pizzazz.text).toBe('PIZZAZZ needs 4 Zs, and only 1 Z and 2 blanks are left: that cannot have been played.')
   const zz = await $.command.run({ command: 'magpie', args: 'zzaeirt' } as never)
-  expect(zz.text).toBe('ZZAEIRT cannot be the rack in ZZAEIRT: only 1 Z is left. What is the rack?')
+  expect(zz.text).toBe('ZZAEIRT cannot be the correct rack: only 1 Z is left. What is the rack?')
   expect(runs.some(run => run.stdin?.includes('gsimulate'))).toBe(false)
 })
