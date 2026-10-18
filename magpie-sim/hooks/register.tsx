@@ -6,18 +6,32 @@ import { cardPicture } from './card'
 import { boardPicture, ROW_TILE_STEP, tilesPicture } from './draw'
 import {
   cgpUnseen,
+  applyMove,
+  blankText,
   checkLexicon,
   choosePosition,
+  distributionName,
   fitsDescription,
   generateRun,
+  missingText,
+  missingTiles,
+  parseDistribution,
   parseGenerated,
+  rackLess,
   racksFor,
+  sameTiles,
+  shortText,
+  tilesFromRack,
+  tilesLeft,
+  withBlanks,
+  type Tiles,
   type GeneratedPlay,
   DEFAULT_LEXICON,
   describePosition,
   gcgPositions,
   interpreterPrompt,
   ITERATIONS_PER_PLAY,
+  letters,
   magpieRun,
   modeFor,
   parseIntent,
@@ -55,6 +69,8 @@ const INTERPRETER_MAX_TOKENS = 400
 const INTERPRETER_TIMEOUT_MS = 30_000
 // The pane's top plays the interpreter is told of.
 const TOP_PLAYS_TOLD = 8
+// The /magpie lines a question keeps, the one that asked it last.
+const ASKED_KEPT = 3
 // Ten minutes, the most $.process.run allows.
 const RUN_TIMEOUT_MS = 600_000
 // The TUI's font (tui/assets/magpie.ttf), under its own licence beside it.
@@ -801,6 +817,11 @@ async function sendPicture($: EngineInterface, given?: Sim): Promise<void> {
 
 let lexicaList: Promise<string[]> | null = null
 
+// The question the last /magpie asked, kept for the next one to answer
+// briefly: "the second z", "14G". A question whose answer the pane already
+// stands on (the rack still to come) is not kept.
+let asked: { typed: string[]; question: string } | undefined
+
 // The lexicons the MAGPIE directory has (its .kwg files); none known for the
 // magpie on PATH.
 async function lexica($: EngineInterface): Promise<string[]> {
@@ -820,6 +841,9 @@ async function lexica($: EngineInterface): Promise<string[]> {
 async function interpret($: EngineInterface, text: string): Promise<Intent> {
   const shown = await readCurrent($)
   const context: InterpreterContext = { lexica: await lexica($) }
+  if (asked !== undefined) {
+    context.asked = asked
+  }
   if (shown !== undefined) {
     // The moves played on from the position's start, and, unless its rack is
     // still to come, the rack and the plays the pane ranks.
@@ -869,20 +893,53 @@ function describeMove(move: MoveDescription): string {
   return [move.word, ...parts].filter(part => part !== '').join(' ')
 }
 
+// The set of tiles the lexicon's games use, from MAGPIE's own data; none
+// known for the magpie on PATH, or a set of many-letter tiles.
+async function tileSet($: EngineInterface, where: Magpie, lexicon: string | undefined): Promise<Tiles | undefined> {
+  const name = distributionName(lexicon ?? DEFAULT_LEXICON)
+  if (name === undefined || where.cwd === undefined) {
+    return undefined
+  }
+  return $.fs
+    .read(`${where.cwd}/data/letterdistributions/${name}.csv`)
+    .then(parseDistribution)
+    .catch(() => undefined)
+}
+
+/** Why the rack a plan moves with cannot be, before a sim waits on it:
+ * MAGPIE's own check (`rack` on the position reached, a quick run), said
+ * with the tiles short where the set's counts tell. */
+async function rackProblem($: EngineInterface, plan: Plan): Promise<string | undefined> {
+  const rack = plan.resolved.rack
+  if (rack === undefined || rack === '') {
+    return undefined
+  }
+  const run = generateRun(plan.resolved, { lexicon: plan.lexicon, goto: plan.goto }, [])
+  const { result, said } = await execute($, plan.where, `checking ${rack}`, { ...run, stdin: `${run.stdin}rack ${rack}\n` })
+  if (!/is not available in the bag/.test(said)) {
+    return undefined
+  }
+  const set = await tileSet($, plan.where, plan.lexicon)
+  const missing = set === undefined ? [] : missingTiles(rack, tilesLeft(set, parseBoard(result.stdout.split('\n')) ?? []))
+  return `${rack} cannot be the rack in ${plan.label}: ${missing.length > 0 ? missingText(missing) : 'the bag does not hold its tiles'}.`
+}
+
 /** A play intent's moves found on the board in order, each a legal play of
  * the word as described, and the position they reach: the request to sim,
- * or the question to ask (a move that fits nowhere, or several places it
- * could be the opponent's), or the rack to ask for. */
+ * or what to ask instead: a move that fits nowhere or cannot be had from
+ * the tiles left, several places the opponent's fits, which tile was a
+ * blank, a leave or rack the tiles do not allow, or the rack itself. */
 async function resolvePlay(
   $: EngineInterface,
   intent: Extract<Intent, { action: 'play' }>,
   shown: Current | undefined,
-): Promise<{ request: SimRequest; message?: string } | { answer: string; reopen?: true }> {
+): Promise<{ request: SimRequest; message?: string } | { answer: string; reopen?: true; followUp?: true }> {
   const base = shown?.request ?? EMPTY_BOARD
   const isShownSim = shown !== undefined && (shown.request.position.rack ?? 'known') !== ''
   const sim = isShownSim ? await loadSim($).catch(() => undefined) : undefined
   if (intent.moves[0]?.by === 'opponent' && sim !== undefined) {
     return {
+      followUp: true,
       answer: `In ${shown?.label ?? 'the pane'} it is your move, with ${sim.rack}: what did you play before ${intent.moves[0].word || 'that'}?`,
     }
   }
@@ -892,36 +949,69 @@ async function resolvePlay(
     throw new Error(`which position of ${base.label} is not clear`)
   }
   const plan = planned.plan
+  const reach = { lexicon: plan.lexicon, goto: plan.goto }
+  const set = await tileSet($, plan.where, plan.lexicon ?? shown?.lexicon)
   const baseAfter = base.position.after ?? []
   const played: PlacedMove[] = []
   const notes: string[] = []
+  const at = (moves: readonly PlacedMove[]): Resolved => {
+    const position: Resolved = { ...plan.resolved, after: [...baseAfter, ...moves] }
+    delete position.rack
+    return position
+  }
+  // The board as the moves leave it, from MAGPIE's own print of the base.
+  const first = await execute($, plan.where, 'reading the board', generateRun(at([]), reach, []))
+  let board = parseBoard(first.result.stdout.split('\n')) ?? []
+  // The person's tiles kept on their latest move, which their next rack
+  // holds: before these moves, the one before the opponent's last.
+  const ownLast = baseAfter[baseAfter.length - 2]
+  let personLeave = ownLast?.leave === undefined ? undefined : { leave: ownLast.leave, word: ownLast.word }
+  // Whose the last move was: the person's leaves the opponent to move.
+  let isLastPerson = false
   for (const [index, move] of intent.moves.entries()) {
+    const isPerson = move.by === 'me' || (move.by === undefined && index % 2 === 0)
+    isLastPerson = isPerson
     if (move.pass === true) {
       played.push({ coordinate: 'pass', word: '' })
       notes.push('a pass')
       continue
     }
-    // The person's own first move is from the rack the pane shows; any
-    // other's tiles are unknown, so the word's own letters stand in.
+    // The person's own first move is from the rack the pane shows. Another's
+    // tiles are unknown: the word's own letters stand in, a blank for each
+    // letter the tiles left cannot supply.
     const isMine = index === 0 && sim !== undefined && move.by !== 'opponent'
-    const racks = isMine ? [sim.rack] : racksFor(move)
+    let racks = isMine ? [sim.rack] : racksFor(move)
     if (racks.length === 0) {
-      return { answer: `${move.word} is too long to find without its square: say where it went (H8, 8H).` }
+      return { followUp: true, answer: `${move.word} is too long to find without its square: say where it went (H8, 8H).` }
     }
-    const position: Resolved = { ...plan.resolved, after: [...baseAfter, ...played] }
-    delete position.rack
-    const { result } = await execute($, plan.where, `finding ${move.word}`, generateRun(position, { lexicon: plan.lexicon, goto: plan.goto }, racks))
-    const board = parseBoard(result.stdout.split('\n')) ?? []
+    if (!isMine && set !== undefined) {
+      const left = tilesLeft(set, board, isPerson ? '' : (personLeave?.leave ?? ''))
+      const tried = racks.map(rack => withBlanks(rack, left))
+      const possible = tried.flatMap(attempt => ('rack' in attempt ? [attempt.rack] : []))
+      const short = tried.find(attempt => 'short' in attempt)
+      if (possible.length === 0 && short !== undefined && 'short' in short) {
+        return { followUp: true, answer: `${shortText(move.word, short.short)}: that cannot have been played.` }
+      }
+      racks = possible
+    } else if (!isMine) {
+      racks = racks.map(rack => rack.replace(/[a-z]/g, '?'))
+    }
+    const { result } = await execute($, plan.where, `finding ${move.word}`, generateRun(at(played), reach, racks))
+    // MAGPIE's own print of the board this move went on.
+    board = parseBoard(result.stdout.split('\n')) ?? board
     const legal = new Map(parseGenerated(result.stdout).flat().map(play => [`${play.coordinate} ${play.word}`, play]))
     const fits = [...legal.values()].filter(play => fitsDescription(play, move, board))
     if (fits.length === 0) {
-      const anywhere = [...legal.values()].filter(play => fitsDescription(play, { word: move.word }, board))
+      const anywhere = [...legal.values()].filter(play => fitsDescription(play, { word: letters(move.word) }, board))
       const why = magpieErrors(result.stdout, result.stderr, '')
       return {
+        followUp: true,
         answer: [
           `${describeMove(move)} is not a legal play here${why === '' ? '' : ` (${why})`}.`,
           anywhere.length === 0
-            ? `${move.word} fits nowhere on this board: is the word or a blank (lowercase) right?`
+            ? isMine
+              ? `${move.word} cannot be played from ${sim.rack} on this board: is the word right, or was the rack another?`
+              : `${move.word} fits nowhere on this board: is the word right?`
             : `${move.word} fits at ${anywhere
                 .slice(0, PLACEMENTS_LISTED)
                 .map(play => `${play.coordinate} ${play.word} ${play.score}`)
@@ -929,44 +1019,105 @@ async function resolvePlay(
         ].join(' '),
       }
     }
-    // The person's own: the best the sim ranked (the play it showed), else
-    // the best by equity. Another's, in more than one place: ask.
-    const ranked = [...fits].sort((a, b) => {
-      const rank = (play: GeneratedPlay) => sim?.plays.findIndex(simmed => simmed.id === `${play.coordinate} ${play.word}`) ?? -1
-      const [rankA, rankB] = [rank(a), rank(b)].map(value => (value < 0 ? Number.MAX_SAFE_INTEGER : value))
-      return (rankA ?? 0) - (rankB ?? 0) || b.equity - a.equity || b.score - a.score
-    })
-    if (ranked.length > 1 && !isMine) {
+    // A placement is its square and its letters; which tile a blank was is
+    // asked apart. The person's own: the best the sim ranked (the play it
+    // showed), else the best by equity. Another's in more than one place: ask.
+    const where = (play: GeneratedPlay) => `${play.coordinate} ${letters(play.word)}`
+    const rank = (play: GeneratedPlay) => {
+      const found = sim?.plays.findIndex(simmed => simmed.id === `${play.coordinate} ${play.word}`) ?? -1
+      return found < 0 ? Number.MAX_SAFE_INTEGER : found
+    }
+    const ranked = [...fits].sort((a, b) => rank(a) - rank(b) || b.equity - a.equity || b.score - a.score)
+    const placements = [...new Set(ranked.map(where))]
+    if (placements.length > 1 && !isMine) {
       return {
+        followUp: true,
         answer: [
-          `${describeMove(move)} fits ${ranked.length} places:`,
-          ...ranked.slice(0, PLACEMENTS_LISTED).map(play => `  ${play.coordinate} ${play.word} for ${play.score}`),
+          `${describeMove(move)} fits ${placements.length} places:`,
+          ...placements.slice(0, PLACEMENTS_LISTED).map(placement => {
+            const play = ranked.find(candidate => where(candidate) === placement) as GeneratedPlay
+            return `  ${play.coordinate} ${play.word} for ${play.score}`
+          }),
           'Which? Say its square or score.',
         ].join('\n'),
       }
     }
-    const chosen = ranked[0] as GeneratedPlay
-    played.push({ coordinate: chosen.coordinate, word: chosen.word })
+    const best = ranked[0] as GeneratedPlay
+    const blanks = ranked.filter(play => where(play) === where(best))
+    if (blanks.length > 1) {
+      // In the order the blank comes in the word, each named by its place.
+      const firstBlank = (word: string) => word.replace(/\([^)]*\)/g, through => through.toUpperCase()).search(/[a-z]/)
+      return {
+        followUp: true,
+        answer: `Which tile of ${letters(move.word)} at ${best.coordinate} was the blank: ${[...blanks]
+          .sort((a, b) => firstBlank(a.word) - firstBlank(b.word))
+          .map(play => `${blankText(play.word)} (${play.word}, ${play.score})`)
+          .join(' or ')}?`,
+      }
+    }
+    // The leave: the person's own from the rack the pane shows, checked
+    // against what they said; another's as said, if the tiles left allow it.
+    const tiles = tilesFromRack(best.word)
+    let leave = move.leave
+    if (isMine) {
+      const kept = rackLess(sim.rack, tiles) ?? ''
+      if (leave !== undefined && !sameTiles(leave, kept)) {
+        return { followUp: true, answer: `From ${sim.rack}, ${best.word} keeps ${kept || 'nothing'}, not ${leave}: which is right?` }
+      }
+      leave = kept
+    } else if (leave !== undefined && set !== undefined) {
+      const missing = missingTiles(tiles + leave, tilesLeft(set, board, isPerson ? '' : (personLeave?.leave ?? '')))
+      if (missing.length > 0) {
+        return { followUp: true, answer: `${best.word} keeping ${leave} cannot be: ${missingText(missing)}.` }
+      }
+    }
+    played.push(leave === undefined || leave === '' ? { coordinate: best.coordinate, word: best.word } : { coordinate: best.coordinate, word: best.word, leave })
+    board = applyMove(board, best.coordinate, best.word)
+    if (isPerson) {
+      personLeave = leave === undefined || leave === '' ? undefined : { leave, word: best.word }
+    }
     notes.push(
-      `${chosen.coordinate} ${chosen.word} for ${chosen.score}${isMine && ranked.length > 1 ? ' (the top of its placements)' : ''}`,
+      `${best.coordinate} ${best.word} for ${best.score}${isMine && placements.length > 1 ? ' (the top of its placements)' : ''}`,
     )
   }
   const after = [...baseAfter, ...played]
   const rack = intent.rack ?? ''
-  const recent = after.slice(-2).map(placed).join(', ')
-  const request: SimRequest = {
-    ...base,
-    position: { ...base.position, after, rack } as SimRequest['position'],
-    label: `${rack === '' ? 'next' : rack} after ${after.length > 2 ? '…, ' : ''}${recent}`,
-  }
   const playedText = notes.length === 0 ? '' : `Played ${notes.join(', then ')}. `
-  if (rack === '') {
-    // Kept as what the pane stands on, so the rack alone can follow.
-    const pending: Current = { request, label: request.label, lexicon: shown?.lexicon ?? plan.lexicon ?? '' }
-    await update($, current, () => JSON.stringify(pending))
-    return { answer: `${playedText}What rack do you have now?` }
+  const recent = after.slice(-2).map(placed).join(', ')
+  const withRack = (held: string): SimRequest => ({
+    ...base,
+    position: { ...base.position, after, rack: held } as SimRequest['position'],
+    label: `${held === '' ? 'next' : held} after ${after.length > 2 ? '…, ' : ''}${recent}`,
+  })
+  // After the person's own move it is the opponent's turn: what they did
+  // is asked, and the answer read with all of this.
+  if (isLastPerson) {
+    const last = played[played.length - 1]
+    return {
+      followUp: true,
+      answer: `${playedText}It is your opponent's turn after ${last === undefined ? 'that' : placed(last)}: what did they play, or did they pass?`,
+    }
   }
-  return { request, message: `${playedText}Simulating ${rack}` }
+  // A rack the tiles left cannot make, or one without the tiles kept.
+  let problem: string | undefined
+  if (rack !== '' && set !== undefined) {
+    const missing = missingTiles(rack, tilesLeft(set, board))
+    if (missing.length > 0) {
+      problem = `${rack} is not possible here: ${missingText(missing)}. What is your rack?`
+    }
+  }
+  if (rack !== '' && problem === undefined && personLeave !== undefined && rackLess(rack, personLeave.leave) === null) {
+    problem = `You kept ${personLeave.leave} after ${personLeave.word}, but ${rack} does not hold it. What is your rack?`
+  }
+  if (rack === '' || problem !== undefined) {
+    // The moves kept as what the pane stands on, so the rack alone can follow.
+    const pending = withRack('')
+    await update($, current, () =>
+      JSON.stringify({ request: pending, label: pending.label, lexicon: shown?.lexicon ?? plan.lexicon ?? '' } satisfies Current),
+    )
+    return { answer: `${playedText}${problem ?? 'What rack do you have now?'}` }
+  }
+  return { request: withRack(rack), message: `${playedText}Simulating ${rack}` }
 }
 
 /** The request an intent makes, against what the pane shows; or the answer
@@ -975,11 +1126,11 @@ async function resolvePlay(
 async function requestFor(
   $: EngineInterface,
   intent: Intent,
-): Promise<{ request: SimRequest; message?: string } | { answer: string; reopen?: true; picture?: true }> {
+): Promise<{ request: SimRequest; message?: string } | { answer: string; reopen?: true; picture?: true; followUp?: true }> {
   const shown = await readCurrent($)
   switch (intent.action) {
     case 'unclear':
-      return { answer: intent.question }
+      return { answer: intent.question, followUp: true }
     case 'reopen':
       return { answer: 'Opened the MAGPIE sim pane.', reopen: true }
     case 'play':
@@ -1138,12 +1289,23 @@ export const register: Register = (on, options) => {
     const fromPhone = e.origin?.kind === 'bridge'
     let found: Awaited<ReturnType<typeof requestFor>>
     let planned: Awaited<ReturnType<typeof planSim>>
+    // A question this one does not answer is dropped: what was typed up to
+    // it is kept while the questions go on, the last few of it.
+    const previous = asked
+    const ask = (question: string) => {
+      asked = { typed: [...(previous?.typed ?? []), args].slice(-ASKED_KEPT), question }
+      return question
+    }
     try {
       found =
         args === ''
           ? { answer: 'Opened the MAGPIE sim pane.', reopen: true }
           : await requestFor($, await interpret($, args))
+      asked = undefined
       if ('answer' in found) {
+        if (found.followUp === true) {
+          ask(found.answer)
+        }
         if (found.reopen === true) {
           await openPane($, await currentTitle($), true)
         }
@@ -1159,13 +1321,37 @@ export const register: Register = (on, options) => {
     if ('candidates' in planned) {
       const first = planned.candidates[0]
       return {
-        text: [
-          ...askWhich(found.request, planned.candidates),
-          `Say which, e.g. /magpie ${found.request.source} turn ${first?.turn ?? 1}`,
-        ].join('\n'),
+        text: ask(
+          [
+            ...askWhich(found.request, planned.candidates),
+            `Say which, e.g. /magpie ${found.request.source} turn ${first?.turn ?? 1}`,
+          ].join('\n'),
+        ),
       }
     }
     const plan = planned.plan
+    try {
+      const problem = await rackProblem($, plan)
+      if (problem !== undefined) {
+        const text = `${found.message?.replace(/Simulating .*$/, '') ?? ''}${problem} What is the rack?`
+        // Moves typed out are kept, the pane standing on them, for the rack
+        // alone to follow; anything else is asked again.
+        if ((found.request.position.after ?? []).length === 0) {
+          return { text: ask(text) }
+        }
+        const pending: SimRequest = {
+          ...found.request,
+          position: { ...found.request.position, rack: '' },
+          label: found.request.label.replace(/^\S+ after /, 'next after '),
+        }
+        await update($, current, () =>
+          JSON.stringify({ request: pending, label: pending.label, lexicon: plan.lexicon ?? '' } satisfies Current),
+        )
+        return { text }
+      }
+    } catch (error) {
+      return { text: error instanceof Error ? error.message : String(error) }
+    }
     const opened = await openPane($, `MAGPIE · ${plan.label}`, true)
     // The sim outlives the command: the pane shows it running, then its
     // results, or what went wrong.
@@ -1202,8 +1388,16 @@ export const register: Register = (on, options) => {
       }
     }
     const plan = planned.plan
-    const opened = await openPane($, `MAGPIE · ${plan.label}`, false)
     let sim: Sim
+    try {
+      const problem = await rackProblem($, plan)
+      if (problem !== undefined) {
+        return { result: `Not run. ${problem} Ask the person for their rack.` }
+      }
+    } catch (error) {
+      return { deny: `${PLUGIN}: ${error instanceof Error ? error.message : String(error)}` }
+    }
+    const opened = await openPane($, `MAGPIE · ${plan.label}`, false)
     try {
       sim = await runPlan($, plan)
     } catch (error) {

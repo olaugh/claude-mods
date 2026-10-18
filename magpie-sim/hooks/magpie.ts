@@ -19,7 +19,12 @@ const SCAN_STEPS = 150
 const RACK_TILES = 7
 
 /** A play as `commit` takes it: `8G VAV`, lowercase a blank. */
-export type PlacedMove = { coordinate: string; word: string }
+export type PlacedMove = {
+  coordinate: string
+  word: string
+  /** The tiles its player kept, when known: committed from the whole rack. */
+  leave?: string
+}
 
 export type Position =
   /** A rack to move with, after the moves played before it, if any. */
@@ -124,6 +129,8 @@ export type InterpreterContext = {
     topPlays?: readonly string[]
   }
   lexica: readonly string[]
+  /** A question the last /magpie asked, and what was typed up to it. */
+  asked?: { typed: readonly string[]; question: string }
 }
 
 /** The interpreter's instructions and the person's words, with what the
@@ -147,6 +154,10 @@ export function interpreterPrompt(text: string, context: InterpreterContext): { 
         ]
           .filter(part => part !== '')
           .join('\n')
+  const asked =
+    context.asked === undefined
+      ? ''
+      : `\nTheir last /magpie asked them something. What they typed: "${context.asked.typed.join('", then "')}". It asked: "${context.asked.question}". When what they type now answers it, reply with that whole request again with the answer folded in (a square or score picks a placement; "the second z" names the blank: JAZz); otherwise read it alone.`
   const lexica =
     context.lexica.length === 0
       ? 'The lexicons installed are not known; use the usual names (CSW24, NWL23).'
@@ -171,7 +182,7 @@ The object is one of:
 - {"action":"picture"} to send a picture of what the pane shows ("send it to my phone", "picture", "image").
 - {"action":"unclear","question":"..."} when you cannot tell what they mean; ask one short question.
 - {"action":"play","moves":[...],"rack":"..."} when the person tells what was played from the position the pane shows, as a game goes on: each move in order, then the rack they now hold.
-  A move: {"word":"INERTIAS"} with whatever they said of it: "by" ("me" for the person, "opponent"), "square" (its first tile's square, 8H or H8 as above), "direction" ("across" or "down"), "score", "through" (tiles on the board it went through: [{"letter":"A","word":"INERTIAS"}], the word on the board each is in), "premium" ("TW", "DW", "TL" or "DL": "to the TWS" is TW). A pass is {"pass":true}. The word is in capitals, the board's tiles in it included. Moves alternate: the person's own first move is from the rack they hold, often one of the top plays.
+  A move: {"word":"INERTIAS"} with whatever they said of it: "by" ("me" for the person, "opponent"), "square" (its first tile's square, 8H or H8 as above), "direction" ("across" or "down"), "score", "through" (tiles on the board it went through: [{"letter":"A","word":"INERTIAS"}], the word on the board each is in), "premium" ("TW", "DW", "TL" or "DL": "to the TWS" is TW). "leave": the tiles they kept ("keeping ion" is "ION"). A pass is {"pass":true}. The word is in capitals, the board's tiles in it included; when they say which tile was a blank, that letter alone in lowercase ("the second z was the blank": JAZz). Moves alternate: the person's own first move is from the rack they hold, often one of the top plays.
   "rack": the tiles they hold now, in capitals, ? for a blank; a ? after letters is the blank ("polish?" is ?HILOPS, not a question), and a rack is not a word to look up. Leave it out when they have not said.
 
 Words like "sim", "opening", "rack", "the", "turn", "where", "played" only say what the rest is. Words are case-insensitive except as "after" says.
@@ -189,9 +200,10 @@ Examples:
 "inertias was played. opp played zag through the a in inertias. next rack for me is polish?" -> {"action":"play","moves":[{"word":"INERTIAS","by":"me"},{"word":"ZAG","by":"opponent","through":[{"letter":"A","word":"INERTIAS"}]}],"rack":"?HILOPS"}
 "I played qi at 8g for 22, they passed, now I have aeinrst" -> {"action":"play","moves":[{"word":"QI","by":"me","square":"8G","score":22},{"pass":true,"by":"opponent"}],"rack":"AEINRST"}
 "my rack is now deeilrv" -> {"action":"play","moves":[],"rack":"DEEILRV"}
+"I played jazz 8g keeping ion" -> {"action":"play","moves":[{"word":"JAZZ","by":"me","square":"8G","leave":"ION"}]}
 "prev" -> {"action":"navigate","to":"previous"}
 "csw" -> {"action":"lexicon","lexicon":"CSW24"}`
-  return { system, prompt: `${state}\n${lexica}\n\nWhat they typed: ${text}` }
+  return { system, prompt: `${state}\n${lexica}${asked}\n\nWhat they typed: ${text}` }
 }
 
 const NAVIGATIONS: readonly Navigation[] = ['next', 'previous', 'first', 'last']
@@ -706,14 +718,15 @@ export type Resolved =
   | { kind: 'cgp'; cgp: string; after?: PlacedMove[]; rack?: string }
   | { kind: 'gcg'; source: string; after?: PlacedMove[]; rack?: string }
 
-/** The commands that commit moves, whoever's turn: each from a rack of just
- * its tiles. `commit` reads a board tile as `.`, not in parentheses. */
+/** The commands that commit moves, whoever's turn: each from a rack of its
+ * tiles and the leave its player kept, when known. `commit` reads a board
+ * tile as `.`, not in parentheses. */
 export function commitCommands(moves: readonly PlacedMove[]): string[] {
   return moves.flatMap(move =>
     move.coordinate === 'pass'
       ? ['commit pass']
       : [
-          `rack ${tilesFromRack(move.word)}`,
+          `rack ${tilesFromRack(move.word)}${move.leave ?? ''}`,
           `commit ${move.coordinate} ${move.word.replace(/\(([^)]*)\)/g, (_, onBoard: string) => '.'.repeat(onBoard.length))}`,
         ],
   )
@@ -818,11 +831,14 @@ export type MoveDescription = {
   through?: { letter: string; word?: string }[]
   /** A premium square one of its tiles covers: "to the TWS". */
   premium?: 'TW' | 'DW' | 'TL' | 'DL'
+  /** The tiles its player kept: "keeping ION". */
+  leave?: string
   /** A pass, which has no word. */
   pass?: true
 }
 
-const letters = (word: string) => word.replace(/[^A-Za-z]/g, '').toUpperCase()
+/** A word's letters in capitals, whatever marked the board's or the blanks. */
+export const letters = (word: string) => word.replace(/[^A-Za-z]/g, '').toUpperCase()
 
 /** Where each tile of a play goes, the board's own (in parentheses) marked. */
 export function playSquares(coordinate: string, word: string): { row: number; col: number; letter: string; isThrough: boolean }[] {
@@ -876,6 +892,11 @@ export function fitsDescription(play: GeneratedPlay, description: MoveDescriptio
   if (letters(play.word) !== letters(description.word)) {
     return false
   }
+  // Lowercase in what the person said marks the blanks: exactly those.
+  const said = canonicalWord(spelling(description.word))
+  if (said !== said.toUpperCase() && spelling(play.word) !== said) {
+    return false
+  }
   if (description.square !== undefined && play.coordinate !== description.square.toUpperCase()) {
     return false
   }
@@ -915,9 +936,10 @@ export function fitsDescription(play: GeneratedPlay, description: MoveDescriptio
  * word's letters less the board's it went through; a word of more than a
  * rack's tiles tries each letter it could have gone through. */
 export function racksFor(description: MoveDescription): string[] {
-  let tiles = [...letters(description.word)]
+  // Case kept: a lowercase letter is a blank the person named.
+  const tiles = [...canonicalWord(spelling(description.word))]
   for (const { letter } of description.through ?? []) {
-    const at = tiles.indexOf(letter.toUpperCase())
+    const at = tiles.findIndex(tile => tile.toUpperCase() === letter.toUpperCase())
     if (at >= 0) {
       tiles.splice(at, 1)
     }
@@ -948,7 +970,10 @@ function parseMove(value: unknown): MoveDescription {
   if (typeof fields.word !== 'string' || letters(fields.word) === '') {
     throw new Error('a move with no word')
   }
-  const move: MoveDescription = { word: letters(fields.word), ...by }
+  const move: MoveDescription = { word: canonicalWord(spelling(fields.word)), ...by }
+  if (typeof fields.leave === 'string' && /^[A-Za-z?]{1,7}$/.test(fields.leave)) {
+    move.leave = fields.leave.toUpperCase()
+  }
   if (typeof fields.square === 'string' && COORDINATE.test(fields.square.toUpperCase())) {
     move.square = fields.square.toUpperCase()
   }
@@ -971,4 +996,180 @@ function parseMove(value: unknown): MoveDescription {
     move.premium = premium
   }
   return move
+}
+
+/** A count of tiles: letters in capitals, `?` for blanks. */
+export type Tiles = Map<string, number>
+
+// Which letter distribution a lexicon's tiles come from, as MAGPIE picks it
+// (letter_distribution.h).
+const DISTRIBUTIONS: readonly [RegExp, string][] = [
+  [/^(CSW|NWL|OSPD|OSW|TWL|America|CEL)/i, 'english'],
+  [/^RD/i, 'german'],
+  [/^NSF/i, 'norwegian'],
+  [/^DISC/i, 'catalan'],
+  [/^FRA/i, 'french'],
+  [/^OSPS/i, 'polish'],
+  [/^DSW/i, 'dutch'],
+]
+
+export function distributionName(lexicon: string): string | undefined {
+  return DISTRIBUTIONS.find(([pattern]) => pattern.test(lexicon))?.[1]
+}
+
+/** A distribution file (`A,a,9,1,...`): each tile and how many the set has.
+ * Undefined for a set with tiles of more than one letter, which the
+ * counting here does not read. */
+export function parseDistribution(csv: string): Tiles | undefined {
+  const tiles: Tiles = new Map()
+  for (const line of csv.split('\n')) {
+    const [tile, , count] = line.split(',')
+    if (tile === undefined || tile === '' || count === undefined) {
+      continue
+    }
+    if ([...tile].length !== 1) {
+      return undefined
+    }
+    tiles.set(tile.toUpperCase(), Number(count))
+  }
+  return tiles
+}
+
+/** The set less the tiles on `board` (a blank is lowercase) and `less`. */
+export function tilesLeft(set: Tiles, board: readonly string[], less = ''): Tiles {
+  const left = new Map(set)
+  const take = (tile: string) => left.set(tile, (left.get(tile) ?? 0) - 1)
+  for (const row of board) {
+    for (const tile of row) {
+      if (tile !== '.') {
+        take(tile === tile.toUpperCase() ? tile : '?')
+      }
+    }
+  }
+  for (const tile of less) {
+    take(tile === '?' || tile !== tile.toUpperCase() ? '?' : tile)
+  }
+  return left
+}
+
+const countOf = (tiles: string) => {
+  const counts: Tiles = new Map()
+  for (const tile of tiles) {
+    counts.set(tile, (counts.get(tile) ?? 0) + 1)
+  }
+  return counts
+}
+
+/** The letters of `tiles` (a `?` a blank) that `left` cannot supply. */
+export function missingTiles(tiles: string, left: Tiles): { tile: string; need: number; have: number }[] {
+  return [...countOf(tiles.toUpperCase())].flatMap(([tile, need]) => {
+    const have = Math.max(0, left.get(tile) ?? 0)
+    return need > have ? [{ tile, need, have }] : []
+  })
+}
+
+/** A rack for `needed` from what is left, a blank standing in for each
+ * letter short; or which letter cannot be had even with the blanks. A
+ * lowercase letter is one the person said was a blank. */
+export function withBlanks(needed: string, left: Tiles): { rack: string } | { short: { tile: string; need: number; have: number; blanks: number } } {
+  const blanks = Math.max(0, left.get('?') ?? 0)
+  const marked = [...needed].filter(tile => tile !== tile.toUpperCase()).length
+  if (marked > blanks) {
+    return { short: { tile: '?', need: marked, have: blanks, blanks: 0 } }
+  }
+  let used = marked
+  let rack = '?'.repeat(marked)
+  const plain = [...needed].filter(tile => tile === tile.toUpperCase()).join('')
+  for (const [tile, need] of countOf(plain)) {
+    const have = Math.max(0, left.get(tile) ?? 0)
+    const excess = Math.max(0, need - have)
+    if (used + excess > blanks) {
+      return { short: { tile, need, have, blanks: Math.max(0, blanks - used) } }
+    }
+    used += excess
+    rack += tile.repeat(need - excess) + '?'.repeat(excess)
+  }
+  return { rack }
+}
+
+/** A word's letters, case kept where the person said which were blanks. */
+export function spelling(word: string): string {
+  return word.replace(/[^A-Za-z]/g, '')
+}
+
+/** `board` with a play's own tiles on it (its board tiles are there). */
+export function applyMove(board: readonly string[], coordinate: string, word: string): string[] {
+  const rows = board.map(row => [...row])
+  for (const square of playSquares(coordinate, word)) {
+    const row = rows[square.row]
+    if (!square.isThrough && row !== undefined) {
+      row[square.col] = square.letter
+    }
+  }
+  return rows.map(row => row.join(''))
+}
+
+/** What stays of `rack` once `tiles` leave it (a blank as `?`), or null when
+ * it does not hold them. */
+export function rackLess(rack: string, tiles: string): string | null {
+  const left = [...rack.toUpperCase()]
+  for (const tile of tiles.toUpperCase()) {
+    const at = left.indexOf(tile)
+    if (at < 0) {
+      return null
+    }
+    left.splice(at, 1)
+  }
+  return left.join('')
+}
+
+const sortTiles = (tiles: string) => [...tiles.toUpperCase()].sort().join('')
+
+/** Whether two racks hold the same tiles, in any order. */
+export function sameTiles(a: string, b: string): boolean {
+  return sortTiles(a) === sortTiles(b)
+}
+
+const plural = (count: number, tile: string) =>
+  `${count === 0 ? 'no' : count} ${tile === '?' ? 'blank' : tile}${count === 1 ? '' : 's'}`
+
+/** Why a word cannot be had from what is left: "PIZZAZZ needs 4 Zs, and
+ * only 1 Z and 2 blanks are left". */
+export function shortText(word: string, short: { tile: string; need: number; have: number; blanks: number }): string {
+  if (short.tile === '?') {
+    return `${word} needs ${plural(short.need, '?')}, and only ${plural(short.have, '?')} ${short.have === 1 ? 'is' : 'are'} left`
+  }
+  return `${word} needs ${plural(short.need, short.tile)}, and only ${plural(short.have, short.tile)} and ${plural(short.blanks, '?')} are left`
+}
+
+/** Why a rack cannot be had: "no blank is left", "only 1 H is left". */
+export function missingText(missing: readonly { tile: string; need: number; have: number }[]): string {
+  return missing
+    .map(({ tile, have }) => (have === 0 ? `no ${tile === '?' ? 'blank' : tile} is left` : `only ${plural(have, tile)} ${have === 1 ? 'is' : 'are'} left`))
+    .join(', ')
+}
+
+const ORDINALS = ['first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth']
+
+/** Which of a play's tiles are its blanks, by place among the word's same
+ * letters: "the second Z", "the A", "the first E and the S". */
+export function blankText(word: string): string {
+  const plain = letters(word)
+  const named: string[] = []
+  let index = 0
+  let isThrough = false
+  for (const char of word) {
+    if (char === '(' || char === ')') {
+      isThrough = char === '('
+      continue
+    }
+    const letter = char.toUpperCase()
+    if (!isThrough && char !== letter) {
+      const same = [...plain].filter(tile => tile === letter).length
+      const place = [...plain.slice(0, index)].filter(tile => tile === letter).length
+      named.push(same === 1 ? `the ${letter}` : `the ${ORDINALS[place] ?? `${place + 1}th`} ${letter}`)
+    }
+    index += 1
+  }
+  return named.length === 0 ? 'no blank' : named.join(' and ')
 }

@@ -68,6 +68,13 @@ it went through, "to the TWS". Your own move is the sim's best-ranked placement 
 the opponent's, when it fits more than one place, is asked about, and a move that fits nowhere says so and where the
 word does fit. With no rack given, `/magpie` asks for it; then the new position is simmed.
 
+Tiles are counted from MAGPIE's letter distribution less the board. A word needing more of a letter than is left
+takes blanks, and when the blank could be more than one of its tiles `/magpie` asks which ("the first Z (JAzZ) or the
+second Z (JAZz)?"; say a blank in lowercase to skip the question). A word the tiles cannot make ("PIZZAZZ needs 4 Zs,
+and only 1 Z and 2 blanks are left") and a rack the bag cannot hold are refused before anything runs. "Keeping ION"
+commits your move from the whole rack, and your next rack must hold ION. A short answer to a question ("the second
+z", "14G") is read with what you typed before it.
+
 A game's position left out is its latest with a player to move. When a turn, rack or word fits more than one
 position, `/magpie` lists them and asks which. Asking Claude ("sim AEINRST after 8G VAV") works too: the mod gives the
 model a `simulate` tool that takes the same request as fields and reports the top plays back.

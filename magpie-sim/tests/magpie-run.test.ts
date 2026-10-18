@@ -2,30 +2,41 @@ import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 
 import {
+  applyMove,
+  blankText,
   canonicalWord,
-  commitCommands,
-  fitsDescription,
-  parseGenerated,
-  playSquares,
-  racksFor,
-  wordOnBoard,
-  type MoveDescription,
   cgpUnseen,
   checkLexicon,
   choosePosition,
   classifyPosition,
+  commitCommands,
   describePosition,
+  distributionName,
+  fitsDescription,
   gcgPositions,
   interpreterPrompt,
   magpieRun,
+  missingText,
+  missingTiles,
+  parseDistribution,
+  parseGenerated,
   parseIntent,
+  playSquares,
   positionLabel,
+  rackLess,
+  racksFor,
   requestFromIntent,
+  sameTiles,
   scanRun,
+  shortText,
   splitCgp,
   tilesFromRack,
+  tilesLeft,
+  withBlanks,
+  wordOnBoard,
   type Choice,
   type Intent,
+  type MoveDescription,
 } from '../hooks/magpie'
 import { headerLine, reportLines, rowLine, tableLayout } from '../hooks/register'
 import { cardPicture } from '../hooks/card'
@@ -847,4 +858,160 @@ test('/magpie plays on: each move found on the board, then the new rack simmed',
   const zagSearch = runs.find(run => run.stdin?.includes('rack ZG\ngenerate'))
   expect(zagSearch?.stdin).toBe('rack QI\ncommit 8G QI\nrack NERTIAS\ncommit H8 .NERTIAS\nshgame\nrack ZG\ngenerate\n')
   expect(zagSearch?.argv.join(' ')).toContain('-wmp false')
+})
+
+// What `generate` printed for JAZ? on the empty board, the first plays and
+// both JAZZes at 8G: the blank either Z.
+const GENERATED_JAZZ = `
+
+   A B C D E F G H I J K L M N O   > Player 1           0
+   ------------------------------    Player 2           0
+ 1|=     '       =       '     = |
+ 2|  -       "       "       -   |   Unseen: 100 (42v | 56c)
+ 3|    -       '   '       -     |   ? ? A A A A A A A A
+ 4|'     -       '       -     ' |   A B B C C D D D D E
+ 5|        -           -         |   E E E E E E E E E E
+ 6|  "       "       "       "   |   E F F G G G H H I I
+ 7|    '       '   '       '     |   I I I I I I I J K L
+ 8|=     '       -       '     = |   L L L M M N N N N N
+ 9|    '       '   '       '     |   N O O O O O O O O P
+10|  "       "       "       "   |   P Q R R R R R R S S
+11|        -           -         |   S S T T T T T T U U
+12|'     -       '       -     ' |   U U V V W W X Y Y Z
+13|    -       '   '       -     |
+14|  -       "       "       -   |
+15|=     '       =       '     = |
+   ------------------------------
+
+1:    8G JA       Z?   18 53.08
+2:    8H JA       Z?   18 52.38
+3:    8G ZA       J?   22 45.95
+10:   8G JAZz          38 38.00
+11:   8G JAzZ          38 38.00
+Showing 179 of 179 plays
+`
+
+// The English set as MAGPIE's letterdistributions/english.csv lists it.
+const ENGLISH_CSV = '?2 A9 B2 C2 D4 E12 F2 G3 H2 I9 J1 K1 L4 M2 N6 O8 P2 Q1 R6 S4 T6 U4 V2 W2 X1 Y2 Z1'
+  .split(' ')
+  .map(entry => `${entry.charAt(0)},${entry.charAt(0).toLowerCase()},${entry.slice(1)},0,0`)
+  .join('\n')
+
+const EMPTY = Array.from({ length: 15 }, () => '.'.repeat(15))
+
+test('the tiles left, and a word or rack they cannot make', () => {
+  expect(distributionName('CSW24')).toBe('english')
+  expect(distributionName('RD28')).toBe('german')
+  expect(distributionName('XYZ')).toBeUndefined()
+  const set = parseDistribution(ENGLISH_CSV)
+  expect(set?.get('E')).toBe(12)
+  expect(parseDistribution('CH,ch,1,5,0\nA,a,9,1,1')).toBeUndefined()
+  const left = tilesLeft(set ?? new Map(), EMPTY)
+  // JAZZ is the one Z and a blank; PIZZAZZ needs more than there are.
+  expect(withBlanks('JAZZ', left)).toEqual({ rack: 'JAZ?' })
+  const pizzazz = withBlanks('PIZZAZZ', left)
+  expect(pizzazz).toEqual({ short: { tile: 'Z', need: 4, have: 1, blanks: 2 } })
+  expect('short' in pizzazz && shortText('PIZZAZZ', pizzazz.short)).toBe('PIZZAZZ needs 4 Zs, and only 1 Z and 2 blanks are left')
+  // A blank named: JAZz is J, A, Z and a blank.
+  expect(withBlanks('JAZz', left)).toEqual({ rack: '?JAZ' })
+
+  const board = applyMove(EMPTY, '8G', 'JAZz')
+  expect(board[7]).toBe('......JAZz.....')
+  const after = tilesLeft(set ?? new Map(), board)
+  expect(missingText(missingTiles('ZOOT', after))).toBe('no Z is left')
+  expect(missingText(missingTiles('??ABCDE', after))).toBe('only 1 blank is left')
+  expect(missingTiles('AEINRST', after)).toEqual([])
+  // What a rack holds once a move's tiles leave it.
+  expect(rackLess('JAZ?ION', 'JAZ?')).toBe('ION')
+  expect(rackLess('AEINRST', 'Q')).toBeNull()
+  expect(sameTiles('ION', 'noi')).toBe(true)
+  expect(commitCommands([{ coordinate: '8G', word: 'JAZz', leave: 'ION' }])).toEqual(['rack JAZ?ION', 'commit 8G JAZz'])
+})
+
+test('which tile was the blank: both JAZZes fit, the one named alone', () => {
+  const board = parseBoard(GENERATED_JAZZ.split('\n')) ?? []
+  const plays = parseGenerated(GENERATED_JAZZ).flat()
+  const fits = (move: MoveDescription) => plays.filter(play => fitsDescription(play, move, board)).map(play => play.word)
+  expect(fits({ word: 'JAZZ', square: '8G' })).toEqual(['JAZz', 'JAzZ'])
+  expect(fits({ word: 'JAzZ', square: '8G' })).toEqual(['JAzZ'])
+  expect(racksFor({ word: 'JAzZ' })).toEqual(['JAzZ'])
+  expect(blankText('JAzZ')).toBe('the first Z')
+  expect(blankText('JAZz')).toBe('the second Z')
+  expect(blankText('bAN(a)Na')).toBe('the B and the third A')
+  expect(blankText('Z(A)G')).toBe('no blank')
+})
+
+// MAGPIE answering from fixtures: the board, a word's plays, a rack it
+// refuses; the English set; the model reading /magpie in `replies` order.
+function playHost(on: On, replies: string[], generated: Record<string, string>) {
+  const runs: { argv: readonly string[]; stdin?: string }[] = []
+  const prompts: string[] = []
+  on('process.run', (_$, e) => {
+    runs.push({ argv: e.argv, stdin: e.init?.stdin })
+    const stdin = e.init?.stdin ?? ''
+    const rack = Object.keys(generated).find(key => stdin.includes(`rack ${key}\ngenerate`))
+    const refused = /rack (ZZ\S*)\n$/.exec(stdin)
+    const value =
+      e.argv[0] === 'printenv'
+        ? { stdout: '/home/test\n', stderr: '' }
+        : e.argv[0] === 'getconf'
+          ? { stdout: '12\n', stderr: '' }
+          : refused !== null
+            ? { stdout: GENERATED_JAZZ.split('\n1:')[0] ?? '', stderr: `(error 29) rack '${refused[1]}' is not available in the bag\n` }
+            : { stdout: rack === undefined ? (GENERATED_JAZZ.split('\n1:')[0] ?? '') : (generated[rack] ?? ''), stderr: '' }
+    return { value: { exitCode: 0, ...value, isStdoutTruncated: false, isStderrTruncated: false } } as never
+  })
+  on('fs.exists', () => ({ value: true }) as never)
+  on('fs.list', () => ({ value: [{ name: 'CSW24.kwg', kind: 'file', size: 1 }] }) as never)
+  on('fs.read', (_$, e) => (e.path.endsWith('/letterdistributions/english.csv') ? { value: ENGLISH_CSV } : { error: 'no such file' }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('model.complete', (_$, e) => {
+    prompts.push(e.prompt)
+    const usage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
+    return { value: { isAnswered: true, text: replies.shift() ?? '', usage } } as never
+  })
+  return { runs, prompts }
+}
+
+test('/magpie asks which Z of JAZZ was the blank, and the answer goes on from the question', async ($, on) => {
+  const replies = [
+    '{"action":"play","moves":[{"word":"JAZZ","by":"me","square":"8G","leave":"ION"}]}',
+    '{"action":"play","moves":[{"word":"JAZz","by":"me","square":"8G","leave":"ION"}]}',
+    '{"action":"play","moves":[{"word":"JAZz","by":"me","square":"8G","leave":"ION"},{"pass":true,"by":"opponent"}],"rack":"ABCDEF?"}',
+    '{"action":"play","moves":[],"rack":"EIMNOT?"}',
+  ]
+  const { runs, prompts } = playHost(on, replies, { 'JAZ?': GENERATED_JAZZ, '?JAZ': GENERATED_JAZZ })
+  const magpie = async (args: string) => (await $.command.run({ command: 'magpie', args } as never)).text
+  expect(await magpie('I played jazz 8g keeping ion')).toBe(
+    'Which tile of JAZZ at 8G was the blank: the first Z (JAzZ, 38) or the second Z (JAZz, 38)?',
+  )
+  expect(runs.some(run => run.stdin?.includes('rack JAZ?\ngenerate'))).toBe(true)
+  // The answer is read with the question; then the opponent's turn is.
+  expect(await magpie('the second z')).toBe(
+    "Played 8G JAZz for 38. It is your opponent's turn after 8G JAZz: what did they play, or did they pass?",
+  )
+  expect(prompts[1]).toContain('What they typed: "I played jazz 8g keeping ion". It asked: "Which tile of JAZZ')
+  // A rack without the ION kept is asked again, the moves kept for the rack
+  // alone to follow.
+  expect(await magpie('they passed, my rack is abcdef?')).toBe(
+    'Played 8G JAZz for 38, then a pass. You kept ION after JAZz, but ABCDEF? does not hold it. What is your rack?',
+  )
+  expect(prompts[2]).toContain('What they typed: "I played jazz 8g keeping ion", then "the second z"')
+  expect(await magpie('eimnot?')).toContain('Simulating EIMNOT?')
+  expect(prompts[3]).not.toContain('It asked')
+  // JAZz committed from the whole rack it was played from.
+  expect(runs.some(run => run.stdin === 'rack JAZ?ION\ncommit 8G JAZz\ncommit pass\nshgame\nrack EIMNOT?\n')).toBe(true)
+})
+
+test('/magpie says PIZZAZZ cannot have been played, and refuses a rack the bag cannot make', async ($, on) => {
+  const { runs } = playHost(
+    on,
+    ['{"action":"play","moves":[{"word":"PIZZAZZ","by":"opponent"}]}', '{"action":"sim","position":"ZZAEIRT"}'],
+    {},
+  )
+  const pizzazz = await $.command.run({ command: 'magpie', args: 'opp played pizzazz' } as never)
+  expect(pizzazz.text).toBe('PIZZAZZ needs 4 Zs, and only 1 Z and 2 blanks are left: that cannot have been played.')
+  const zz = await $.command.run({ command: 'magpie', args: 'zzaeirt' } as never)
+  expect(zz.text).toBe('ZZAEIRT cannot be the rack in ZZAEIRT: only 1 Z is left. What is the rack?')
+  expect(runs.some(run => run.stdin?.includes('gsimulate'))).toBe(false)
 })
