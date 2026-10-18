@@ -382,11 +382,16 @@ export function describePlay(play: Play): string {
   return `The board with ${play.id} placed, ${play.score} points`
 }
 
-/** A play as the table spells it: its square (`exch`, `pass` for the
- * others) and its tiles, the board's own (in parentheses) marked. */
+/** A play as people write it: `8F DROP`, an exchange `-EO`, `pass`. */
+export function playName(play: Play): string {
+  return play.kind === 'exchange' ? `-${play.tiles}` : play.id
+}
+
+/** A play as the table spells it: its square (`-` before an exchange's
+ * tiles, `pass`) and its tiles, the board's own (in parentheses) marked. */
 export function playTiles(play: Play): { label: string; tiles: { letter: string; isThrough: boolean }[] } {
   if (play.kind === 'exchange') {
-    return { label: 'exch', tiles: [...play.tiles].map(letter => ({ letter, isThrough: false })) }
+    return { label: '-', tiles: [...play.tiles].map(letter => ({ letter, isThrough: false })) }
   }
   if (play.kind === 'pass') {
     return { label: 'pass', tiles: [] }

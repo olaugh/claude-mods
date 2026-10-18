@@ -166,10 +166,11 @@ for (const [surface, bodyColumns] of [
     // The terminal spells each play's tiles as a picture beside its square.
     const selected = (rank: number, label: string) =>
       new RegExp(surface === 'terminal' ? `^▶ +${rank} ${label} *$` : `^▶ +${rank} ${label} `)
-    expect(await ui.find({ type: 'Text', text: selected(1, 'exch') })).toBeDefined()
+    // An exchange is written -Q: its tiles after the dash where they are pictures.
+    expect(await ui.find({ type: 'Text', text: selected(1, surface === 'terminal' ? '-' : '-Q') })).toBeDefined()
     expect(await ui.find({ type: surface === 'terminal' ? 'Image' : 'Svg' })).toBeDefined()
     if (surface === 'terminal') {
-      expect(await ui.find({ type: 'Image', key: 'tiles-8F DROP' })).toBeDefined()
+      expect(await ui.find({ type: 'Image', key: 'tiles' })).toBeDefined()
     }
 
     await ui.press({ key: 'pick-8F DROP' })
@@ -228,18 +229,19 @@ test('a tall pane lists the top 15 plays, its pictures inside the tree budget', 
     },
   })
   const tree = await ui.drawn()
-  const images = await ui.findAll({ type: 'Image' })
-  expect(images.filter(image => image.key?.startsWith('tiles-'))).toHaveLength(15)
+  // Two pictures, the board and the tiles of all 15 rows in one.
+  expect(await ui.findAll({ type: 'Image' })).toHaveLength(2)
+  const buttons = await ui.findAll({ type: 'Button' })
+  expect(buttons.filter(button => /^pick-\d+[A-D] ETAERIO$/.test(button.key ?? ''))).toHaveLength(15)
   expect(await ui.find({ type: 'Text', text: /top 15 of 50/ })).toBeDefined()
   // Every picture's decoded bytes, as Claude Code counts them; the selected
-  // row's text backgrounds and its tiles' picture.
+  // row's text backgrounds and the tile column's picture.
   let bytes = 0
   const selectedBackgrounds = new Set<string>()
-  const tilePngs = new Map<string, Uint8Array>()
+  let tiles: { png: Uint8Array; rows: number } | undefined
   type Node = {
     type?: string
-    key?: string
-    props?: { key?: string; backgroundColor?: string; source?: { png?: string; rgba?: string } }
+    props?: { key?: string; rows?: number; backgroundColor?: string; source?: { png?: string; rgba?: string } }
     children?: unknown[]
   }
   const walk = (node: unknown) => {
@@ -249,8 +251,8 @@ test('a tall pane lists the top 15 plays, its pictures inside the tree budget', 
     const { type, props, children } = node as Node
     const source = type === 'Image' ? (props?.source?.png ?? props?.source?.rgba) : undefined
     bytes += source === undefined ? 0 : Math.floor((source.length * 3) / 4)
-    if (type === 'Image' && props?.source?.png !== undefined && props.key?.startsWith('tiles-') === true) {
-      tilePngs.set(props.key, Uint8Array.fromBase64(props.source.png))
+    if (type === 'Image' && props?.source?.png !== undefined && props.key === 'tiles') {
+      tiles = { png: Uint8Array.fromBase64(props.source.png), rows: props.rows ?? 0 }
     }
     if (type === 'Text' && props?.backgroundColor !== undefined) {
       selectedBackgrounds.add(props.backgroundColor)
@@ -260,13 +262,16 @@ test('a tall pane lists the top 15 plays, its pictures inside the tree budget', 
     }
   }
   walk(tree)
-  // Compressed, the board and 15 rows are a sliver of the budget.
+  // Compressed, the board and the column are a sliver of the budget.
   expect(bytes).toBeGreaterThan(10_000)
   expect(bytes).toBeLessThan(MAX_IMAGE_SOURCE / 10)
-  // The selected row (the first) on one colour, its tiles' picture with an
-  // alpha channel (colour type 6, IHDR byte 25) so the others stay clear.
+  // The selected row (the first) on one colour; the column a terminal row
+  // a play, 42 pixels each (IHDR height at byte 20), with an alpha channel
+  // (colour type 6, byte 25) so the rows not selected stay clear.
   expect([...selectedBackgrounds]).toEqual(['#385278'])
-  expect(tilePngs.get('tiles-1A ETAERIO')?.[25]).toBe(6)
+  expect(tiles?.rows).toBe(15)
+  expect(new DataView((tiles?.png ?? new Uint8Array(32)).buffer).getUint32(20)).toBe(15 * 42)
+  expect(tiles?.png[25]).toBe(6)
   // The other listed plays' pictures drawn ahead, a timer tick each.
   await clock.advance(1000)
   const why = await $.command.run({ command: 'magpie', args: 'why' } as never)

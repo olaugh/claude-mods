@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { SortKey } from '../types'
 import { cardPicture } from './card'
-import { boardPicture, tilesPicture, type Picture } from './draw'
+import { boardPicture, tilesColumnPicture, type Picture } from './draw'
 import {
   cgpUnseen,
   applyMove,
@@ -54,7 +54,7 @@ import {
   type SimRequest,
 } from './magpie'
 import { encodePng } from './png'
-import { describePlay, parseBoard, parseSim, playTiles, resultText, type Play, type Sim } from './sim'
+import { describePlay, parseBoard, parseSim, playName, playTiles, resultText, type Play, type Sim } from './sim'
 import { boardSvg } from './svg'
 import { SELECTED_ROW } from './theme'
 import { parseFont, type Font } from './truetype'
@@ -169,7 +169,7 @@ export async function loadSim($: EngineInterface): Promise<Sim> {
   const source = text !== '' ? text : await simPath($)
   if (simLoad?.source !== source) {
     pictures.clear()
-    rowPictures.clear()
+    columnPictures.clear()
     drawingAhead = null
     const sim = text !== '' ? Promise.resolve().then(() => parseSim(text)) : $.fs.read(source).then(parseSim)
     simLoad = { source, sim }
@@ -498,7 +498,7 @@ type Column = {
 const signed = (value: number) => (value > 0 ? '+' : '') + value.toFixed(2)
 
 const COLUMNS: readonly Column[] = [
-  { title: 'Play', sort: 'play', isLeft: true, isCompact: true, cell: play => play.id },
+  { title: 'Play', sort: 'play', isLeft: true, isCompact: true, cell: playName },
   { title: 'Leave', isLeft: true, cell: play => play.leave },
   { title: 'Sc', sort: 'score', isCompact: true, cell: play => String(play.score) },
   { title: 'Win%', sort: 'win', isCompact: true, cell: play => play.winPct.toFixed(2) },
@@ -514,7 +514,7 @@ const COLUMNS: readonly Column[] = [
 // An endgame's table: the final spread, what the line nets, and the rest of
 // the line.
 const ENDGAME_COLUMNS: readonly Column[] = [
-  { title: 'Play', sort: 'play', isLeft: true, isCompact: true, cell: play => play.id },
+  { title: 'Play', sort: 'play', isLeft: true, isCompact: true, cell: playName },
   { title: 'Sc', sort: 'score', isCompact: true, cell: play => String(play.score) },
   { title: 'Result', sort: 'result', isCompact: true, cell: play => resultText(play.result) },
   { title: 'Net', sort: 'net', isCompact: true, cell: play => (play.net === undefined ? '' : `${play.net > 0 ? '+' : ''}${play.net}`) },
@@ -657,14 +657,14 @@ export function reportLines(sim: Sim, count: number): string[] {
       .slice(0, count)
       .map(
         play =>
-          `${play.rank}. ${play.id}: ${play.score} pts, ${resultText(play.result)}, net ${play.net ?? 0}${play.line === '' || play.line === undefined ? '' : `; then ${play.line}`}`,
+          `${play.rank}. ${playName(play)}: ${play.score} pts, ${resultText(play.result)}, net ${play.net ?? 0}${play.line === '' || play.line === undefined ? '' : `; then ${play.line}`}`,
       )
   }
   return sim.plays
     .slice(0, count)
     .map(
       play =>
-        `${play.rank}. ${play.id}${play.leave === '' ? '' : ` (keeps ${play.leave})`}: ${play.score} pts, win ${play.winPct.toFixed(2)}% ±${play.winSe.toFixed(2)}, equity ${signed(play.equity)}`,
+        `${play.rank}. ${playName(play)}${play.leave === '' ? '' : ` (keeps ${play.leave})`}: ${play.score} pts, win ${play.winPct.toFixed(2)}% ±${play.winSe.toFixed(2)}, equity ${signed(play.equity)}`,
     )
 }
 
@@ -768,19 +768,29 @@ async function selectPlay($: EngineInterface, id: string) {
   await update($, selectedId, () => id)
 }
 
-// A row's tiles as a PNG, by play and whether it is selected, for the sim
-// loaded now: just its own tiles, the slots past them spaces of text; clear
-// between the tiles, so the pane shows through, or the selected row's
-// colour, as its text is.
-const rowPictures = new Map<string, string>()
+// The table's tile column as a PNG, for the sim loaded now, by the rows it
+// shows and which is selected: clear around the tiles, so the pane shows
+// through, the selected row on its colour, as its text is. The last few
+// kept, so going back to a row draws nothing.
+const columnPictures = new Map<string, string>()
+const COLUMN_PICTURES_KEPT = 16
 
-function rowTilesSource(font: Font, play: Play, isSelected: boolean) {
-  const key = `${isSelected ? 'selected' : 'plain'}:${play.id}`
-  let png = rowPictures.get(key)
+function tilesColumnSource(font: Font, plays: readonly Play[], selectedId: string, slots: number) {
+  const key = `${slots}|${selectedId}|${plays.map(play => play.id).join('|')}`
+  let png = columnPictures.get(key)
   if (png === undefined) {
-    const { tiles } = playTiles(play)
-    png = pngSource(tilesPicture(font, tiles, tiles.length, isSelected ? SELECTED_ROW : undefined), true)
-    rowPictures.set(key, png)
+    const rows = plays.map(play => ({
+      tiles: playTiles(play).tiles,
+      ...(play.id === selectedId && { background: SELECTED_ROW }),
+    }))
+    png = pngSource(tilesColumnPicture(font, rows, slots), true)
+    if (columnPictures.size >= COLUMN_PICTURES_KEPT) {
+      const oldest = columnPictures.keys().next().value
+      if (oldest !== undefined) {
+        columnPictures.delete(oldest)
+      }
+    }
+    columnPictures.set(key, png)
   }
   return { png }
 }
@@ -931,7 +941,7 @@ async function interpret($: EngineInterface, text: string): Promise<Intent> {
       ...(shown.turn === undefined ? {} : { turn: shown.turn, turns: shown.turns }),
       moves: after.map(move => (move.coordinate === 'pass' ? 'pass' : `${move.coordinate} ${move.word}`)),
       rack: sim?.rack ?? '',
-      topPlays: (sim?.plays ?? []).slice(0, TOP_PLAYS_TOLD).map(play => `${play.id} ${play.score}`),
+      topPlays: (sim?.plays ?? []).slice(0, TOP_PLAYS_TOLD).map(play => `${playName(play)} ${play.score}`),
     }
   }
   const { system, prompt } = interpreterPrompt(text, context)
@@ -1580,12 +1590,13 @@ export const register: Register = (on, options) => {
       } catch (fontError) {
         fontProblem = `Could not read ${FONT_FILE}: ${String(fontError)}`
       }
-      // The terminal spells each play in tiles, as pictures, while they and
-      // the board's fit the tree's budget (kept, so drawn once); else in
-      // letters.
+      // The terminal spells each play in tiles, a column of them as one
+      // picture, while it and the board's fit the tree's budget (kept, so
+      // drawn once); else in letters.
+      const listedSlots = Math.max(1, ...listed.map(play => playTiles(play).tiles.length))
       const tiledBytes = (shownFont: Font) =>
         sourceBytes(pictureSource(shownFont, sim, selected).png) +
-        listed.reduce((total, play) => total + sourceBytes(rowTilesSource(shownFont, play, play.id === selected.id).png), 0)
+        sourceBytes(tilesColumnSource(shownFont, listed, selected.id, listedSlots).png)
       const isTiled = e.surface === 'terminal' && font !== null && tiledBytes(font) <= IMAGE_BUDGET
       if (e.surface === 'terminal' && font !== null) {
         drawAhead($, font, sim)
@@ -1644,52 +1655,48 @@ export const register: Register = (on, options) => {
         </Box>
       )
 
-      // Each row is a button that puts its play on the board; a tiled row's
-      // tiles sit between its two halves, a picture no click reaches.
+      // Each row is a button that puts its play on the board. Tiled, the
+      // rows' halves stand in two columns with the tiles between, one
+      // picture down the rows that no click reaches.
       const TileImage = e.surface === 'terminal' ? $.ui.resolve(e).Image : undefined
-      // The selected row on one colour, its tiles' picture painted the same.
+      // The selected row on one colour, its tiles painted the same; a line
+      // each, so the halves keep beside the picture's rows.
       const rowText = (text: string, isSelected: boolean) =>
         isSelected ? (
-          <Text backgroundColor={SELECTED_BACKGROUND} color={SELECTED_TEXT}>
+          <Text backgroundColor={SELECTED_BACKGROUND} color={SELECTED_TEXT} wrap="truncate-end">
             {text}
           </Text>
         ) : (
-          <Text>{text}</Text>
+          <Text wrap="truncate-end">{text}</Text>
         )
-      const rows = shown.map(play => {
-        const isSelected = play.id === selected.id
-        const pick = () => selectPlay($, play.id)
-        if (layout.tiles === undefined || font === null || TileImage === undefined) {
-          return (
-            <Button key={`pick-${play.id}`} plain onPress={pick}>
-              {rowText(rowLine(layout, play, isSelected), isSelected)}
-            </Button>
-          )
-        }
-        const parts = rowParts(layout, play, isSelected)
-        const tileCount = playTiles(play).tiles.length
-        // The slots past its tiles are spaces, on the row's colour.
-        const after = ' '.repeat(TILE_COLUMNS * (layout.tiles.slots - tileCount)) + parts.after
-        return (
-          <Box key={`row-${play.id}`} flexDirection="row">
-            <Button key={`pick-${play.id}`} plain onPress={pick}>
-              {rowText(parts.before, isSelected)}
-            </Button>
-            {tileCount === 0 ? null : (
-              <TileImage
-                key={`tiles-${play.id}`}
-                source={rowTilesSource(font, play, isSelected)}
-                columns={TILE_COLUMNS * tileCount}
-                rows={1}
-                alt={play.id}
-              />
-            )}
-            <Button key={`pick-${play.id}-numbers`} plain onPress={pick}>
-              {rowText(after, isSelected)}
-            </Button>
+      const rowButton = (play: Play, key: string, text: string) => (
+        <Button key={key} plain onPress={() => selectPlay($, play.id)}>
+          {rowText(text, play.id === selected.id)}
+        </Button>
+      )
+      const tiles = layout.tiles
+      const rows =
+        tiles === undefined || font === null || TileImage === undefined || shown.length === 0 ? (
+          shown.map(play => rowButton(play, `pick-${play.id}`, rowLine(layout, play, play.id === selected.id)))
+        ) : (
+          <Box key="rows" flexDirection="row">
+            <Box flexDirection="column">
+              {shown.map(play => rowButton(play, `pick-${play.id}`, rowParts(layout, play, play.id === selected.id).before))}
+            </Box>
+            <TileImage
+              key="tiles"
+              source={tilesColumnSource(font, shown, selected.id, tiles.slots)}
+              columns={TILE_COLUMNS * tiles.slots}
+              rows={shown.length}
+              alt={shown.map(playName).join(', ')}
+            />
+            <Box flexDirection="column">
+              {shown.map(play =>
+                rowButton(play, `pick-${play.id}-numbers`, rowParts(layout, play, play.id === selected.id).after),
+              )}
+            </Box>
           </Box>
         )
-      })
 
       const timing = e.surface === 'terminal' ? ` · picture ${lastPictureMs} ms` : ''
       const table = (

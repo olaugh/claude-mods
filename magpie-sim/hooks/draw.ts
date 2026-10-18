@@ -96,33 +96,43 @@ export const ROW_TILE_STEP = SQUARE + ROW_TILE_GAP
 const ROW_TILE_MARGIN = 3
 export const ROW_TILE_HEIGHT = SQUARE + 2 * ROW_TILE_MARGIN
 
-/** A play's tiles in a row, `slots` wide so every row of the table lines
- * up: the tiles it plays bright, as the board's preview draws them, the
- * board's own it plays through darker, blanks grey; the rest left clear,
- * or filled with `background` (the selected row's). */
-export function tilesPicture(
-  font: Font,
-  tiles: readonly { letter: string; isThrough: boolean }[],
-  slots: number,
-  background?: Rgb,
-): Picture {
-  const picture: Picture = {
-    width: slots * ROW_TILE_STEP,
-    height: ROW_TILE_HEIGHT,
-    pixels: new Uint8Array(slots * ROW_TILE_STEP * ROW_TILE_HEIGHT * 4),
-  }
-  const canvas = pixelCanvas(picture, font)
+type RowTiles = readonly { letter: string; isThrough: boolean }[]
+
+// One row's tiles, `top` pixels down: the tiles it plays bright, as the
+// board's preview draws them, the board's own it plays through darker,
+// blanks grey; the rest left clear, or filled with `background`.
+function drawTileRow(canvas: Canvas, font: Font, tiles: RowTiles, top: number, width: number, background?: Rgb) {
   if (background !== undefined) {
-    canvas.rect(0, 0, picture.width, picture.height, background)
+    canvas.rect(0, top, width, ROW_TILE_HEIGHT, background)
   }
   for (const [index, { letter, isThrough }] of tiles.entries()) {
-    drawTile(canvas, font, index * ROW_TILE_STEP + ROW_TILE_GAP / 2, ROW_TILE_MARGIN, {
+    drawTile(canvas, font, index * ROW_TILE_STEP + ROW_TILE_GAP / 2, top + ROW_TILE_MARGIN, {
       letter,
       ...tileColors(letter, isThrough ? TILE_BG : PREVIEW_BG),
       isBold: !isThrough,
       hasScore: false,
       isLarge: true,
     })
+  }
+}
+
+/** A play's tiles in a row, `slots` wide so every row of the table lines
+ * up, on `background` (the selected row's) or clear. */
+export function tilesPicture(font: Font, tiles: RowTiles, slots: number, background?: Rgb): Picture {
+  return tilesColumnPicture(font, [{ tiles, background }], slots)
+}
+
+/** The table's tile column: each row's tiles under the last, a terminal
+ * row each, `slots` wide, a row's `background` (the selected one's) behind
+ * it. One picture for the whole column, as the terminal shows one picture
+ * more surely than many small ones. */
+export function tilesColumnPicture(font: Font, rows: readonly { tiles: RowTiles; background?: Rgb }[], slots: number): Picture {
+  const width = slots * ROW_TILE_STEP
+  const height = Math.max(1, rows.length) * ROW_TILE_HEIGHT
+  const picture: Picture = { width, height, pixels: new Uint8Array(width * height * 4) }
+  const canvas = pixelCanvas(picture, font)
+  for (const [index, { tiles, background }] of rows.entries()) {
+    drawTileRow(canvas, font, tiles, index * ROW_TILE_HEIGHT, width, background)
   }
   return picture
 }
