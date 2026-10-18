@@ -422,6 +422,8 @@ export function simOptions(lexicon: string | undefined, threads: number, acceler
     '-wmp', 'true',
     '-rit', String(accelerators.rit),
     '-wit', String(accelerators.wit),
+    // Mapped, the 1.9 GB RIT costs no time to load; pages come in as used.
+    '-ritmmap', String(accelerators.rit),
     '-s1', 'equity', '-s2', 'equity',
     '-r1', 'all', '-r2', 'all',
     '-numplays', String(SIM_PLAYS),
