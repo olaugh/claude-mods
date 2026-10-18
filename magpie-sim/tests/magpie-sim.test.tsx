@@ -138,7 +138,7 @@ for (const [surface, bodyColumns] of [
   ['desktop', 100],
   ['mobile', 44],
 ] as const) {
-  test(`the pane moves and sorts on ${surface}`, async ($, on) => {
+  test(`a click picks a row, and a heading sorts, on ${surface}`, async ($, on) => {
     // Stands in for the surface: takes each picture swap.
     const blits: string[] = []
     on('ui.blit', (_$, e) => {
@@ -163,24 +163,27 @@ for (const [surface, bodyColumns] of [
         view: {},
       },
     })
-    expect(await ui.find({ type: 'Text', text: /^▶ +1 exch Q / })).toBeDefined()
+    // The terminal spells each play's tiles as a picture beside its square.
+    const selected = (rank: number, label: string) =>
+      new RegExp(surface === 'terminal' ? `^▶ +${rank} ${label} *$` : `^▶ +${rank} ${label} `)
+    expect(await ui.find({ type: 'Text', text: selected(1, 'exch') })).toBeDefined()
     expect(await ui.find({ type: surface === 'terminal' ? 'Image' : 'Svg' })).toBeDefined()
-
-    await ui.press({ key: 'down' })
-    expect(await ui.find({ type: 'Text', text: /^▶ +2 exch QR/ })).toBeDefined()
-    // At the top already, the second up moves nothing.
-    await ui.press({ key: 'up' })
-    await ui.press({ key: 'up' })
-    expect(await ui.find({ type: 'Text', text: /^▶ +1 exch Q / })).toBeDefined()
     if (surface === 'terminal') {
-      expect(blits).toEqual(['board', 'board'])
+      expect(await ui.find({ type: 'Image', key: 'tiles-8F DROP' })).toBeDefined()
+    }
+
+    await ui.press({ key: 'pick-8F DROP' })
+    expect(await ui.find({ type: 'Text', text: selected(10, '8F') })).toBeDefined()
+    // A click on the row already picked does nothing.
+    await ui.press({ key: 'pick-8F DROP' })
+    if (surface === 'terminal') {
+      expect(blits).toEqual(['board'])
     }
 
     // A new order keeps the selected play, its rank the sim's own.
     await ui.press({ key: 'sort-score' })
     expect(await ui.find({ type: 'Text', text: /Sc▼/ })).toBeDefined()
-    await ui.press({ key: 'down' })
-    expect(await ui.find({ type: 'Text', text: /^▶ +2 exch QR/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: selected(10, '8F') })).toBeDefined()
     await ui.press({ key: 'sort-score' })
     expect(await ui.find({ type: 'Text', text: /Sc▲/ })).toBeDefined()
     await ui.unmount()

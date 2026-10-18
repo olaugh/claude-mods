@@ -19,6 +19,8 @@ export const PREVIEW_BG: Rgb = [
 ]
 // A spent rack tile: grey on the background.
 export const GHOST_FG: Rgb = [102, 102, 102]
+// A blank's letter, on whatever tile it is (tui/theme.c's blank_tile_fg).
+export const BLANK_FG: Rgb = [170, 170, 170]
 export const PREMIUM_COLORS: Readonly<Record<Premium, { bg: Rgb; fg: Rgb }>> = {
   TW: { bg: [91, 35, 47], fg: [204, 117, 133] },
   DW: { bg: [124, 63, 77], fg: [216, 154, 160] },

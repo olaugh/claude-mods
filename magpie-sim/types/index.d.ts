@@ -16,6 +16,8 @@ declare module 'claude-code' {
       running: string
       /** Why the last run failed; empty when it did not. */
       runError: string
+      /** What the pane shows, as JSON (register.tsx's Current); empty before a run. */
+      current: string
     }
   }
 }

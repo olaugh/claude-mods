@@ -6,6 +6,7 @@ import { BOARD_DIM, COLUMN_LETTERS, premiumAt, TILE_SCORES } from './layout'
 import { placedTiles, rackGhosts, type Play } from './sim'
 import {
   BACKGROUND,
+  BLANK_FG,
   BOARD,
   BOARD_SPAN,
   EMPTY_SQUARE,
@@ -38,6 +39,8 @@ export type Canvas = {
 
 // tui/pixel_compose.c's proportions of a tile with score subscripts.
 const LETTER_SIZE = Math.floor(SQUARE * 0.5)
+// Its letter on a tile without one, as small tiles draw.
+const LARGE_LETTER_SIZE = Math.floor(SQUARE * 0.74)
 const SCORE_SIZE = Math.floor(SQUARE * 0.24)
 const LETTER_BASELINE = Math.floor(SQUARE * 0.72)
 const LETTER_LIFT = Math.floor(SQUARE * 0.08)
@@ -50,18 +53,26 @@ export function glyphInk(font: Font, char: string, size: number, isBold: boolean
   return inkBox(font.outline(char.codePointAt(0) ?? 0, isBold), size / font.unitsPerEm)
 }
 
-type Tile = { letter: string; fg: Rgb; bg: Rgb; isBold: boolean; hasScore: boolean }
+/** `isLarge`: a tile without a score drawn small (a row of the table), its
+ * letter at the TUI's size for that. */
+export type Tile = { letter: string; fg: Rgb; bg: Rgb; isBold: boolean; hasScore: boolean; isLarge?: true }
 
-function drawTile(canvas: Canvas, font: Font, x: number, y: number, tile: Tile) {
+/** A tile's colours on `bg`: a blank's letter grey, as the TUI draws it. */
+export function tileColors(letter: string, bg: Rgb): { fg: Rgb; bg: Rgb } {
+  return { fg: letter === letter.toLowerCase() ? BLANK_FG : TILE_FG, bg }
+}
+
+export function drawTile(canvas: Canvas, font: Font, x: number, y: number, tile: Tile) {
   canvas.rect(x, y, SQUARE, SQUARE, tile.bg)
-  const ink = glyphInk(font, tile.letter, LETTER_SIZE, tile.isBold)
+  const size = tile.isLarge === true && !tile.hasScore ? LARGE_LETTER_SIZE : LETTER_SIZE
+  const ink = glyphInk(font, tile.letter, size, tile.isBold)
   const score = TILE_SCORES[tile.letter] ?? 0
   if (ink !== null) {
     const inkWidth = Math.ceil(ink.maxX) - Math.floor(ink.minX)
     // Off centre to the left, and raised, to leave the score its corner.
     const shift = tile.hasScore ? Math.floor(SQUARE * (score >= 10 ? 0.07 : 0.03)) : 0
     const baseline = LETTER_BASELINE - (tile.hasScore ? LETTER_LIFT : 0)
-    canvas.glyph(tile.letter, LETTER_SIZE, tile.isBold, x + Math.floor((SQUARE - inkWidth) / 2) - shift, y + baseline, tile.fg)
+    canvas.glyph(tile.letter, size, tile.isBold, x + Math.floor((SQUARE - inkWidth) / 2) - shift, y + baseline, tile.fg)
   }
   if (!tile.hasScore) {
     return
@@ -134,8 +145,7 @@ export function drawBoard(canvas: Canvas, font: Font, board: readonly string[] |
       } else {
         drawTile(canvas, font, squareX(col), squareY(row), {
           letter,
-          fg: TILE_FG,
-          bg: TILE_BG,
+          ...tileColors(letter, TILE_BG),
           isBold: false,
           hasScore: letter !== letter.toLowerCase(),
         })
@@ -148,8 +158,7 @@ export function drawBoard(canvas: Canvas, font: Font, board: readonly string[] |
   for (const { row, col, letter } of placedTiles(play)) {
     drawTile(canvas, font, squareX(col), squareY(row), {
       letter,
-      fg: TILE_FG,
-      bg: PREVIEW_BG,
+      ...tileColors(letter, PREVIEW_BG),
       isBold: true,
       hasScore: letter !== letter.toLowerCase(),
     })

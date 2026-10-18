@@ -282,3 +282,25 @@ export function describePlay(play: Play): string {
   }
   return `The board with ${play.id} placed, ${play.score} points`
 }
+
+/** A play as the table spells it: its square (`exch`, `pass` for the
+ * others) and its tiles, the board's own (in parentheses) marked. */
+export function playTiles(play: Play): { label: string; tiles: { letter: string; isThrough: boolean }[] } {
+  if (play.kind === 'exchange') {
+    return { label: 'exch', tiles: [...play.tiles].map(letter => ({ letter, isThrough: false })) }
+  }
+  if (play.kind === 'pass') {
+    return { label: 'pass', tiles: [] }
+  }
+  const [label = '', word = ''] = play.id.split(' ')
+  const tiles: { letter: string; isThrough: boolean }[] = []
+  let isThrough = false
+  for (const char of word) {
+    if (char === '(' || char === ')') {
+      isThrough = char === '('
+    } else {
+      tiles.push({ letter: char, isThrough })
+    }
+  }
+  return { label, tiles }
+}

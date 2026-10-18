@@ -1,4 +1,4 @@
-// Turns what the person names (an opening rack, a CGP, a path or URL of a
+// Turns what the person asks for (an opening rack, a CGP, a path or URL of a
 // CGP or GCG, and for a GCG which position in it) into a MAGPIE run:
 // `setoptions` with the sim's settings on the command line, which keeps
 // MAGPIE reading commands, then the position and `gsimulate` on its
@@ -63,30 +63,266 @@ export type SimRequest = {
 }
 
 const RACK = /^[A-Za-z?]{1,7}$/
-const LEXICON = /^[A-Za-z]+\d+$/
+const LEXICON_NAME = /^[A-Z]+\d*$/
 // Pages MAGPIE's `load` knows how to read a game from.
 const GAME_SITES = /(^|\.)(woogles\.io|cross-tables\.com)$/i
-// Words naming what the next token is, and words that say nothing.
-const KEYWORDS: Readonly<Record<string, Selector['kind']>> = {
-  turn: 'turn',
-  move: 'turn',
-  rack: 'rack',
-  word: 'word',
-  play: 'word',
-  before: 'word',
-  event: 'goto',
-}
-// Words that say nothing about which position: "the turn where I played
-// VODKA" is VODKA. `turn` and `move` are filler too unless a number follows.
-const FILLER = new Set([
-  'at', 'on', 'in', 'the', 'a', 'an', 'with', 'of', 'for',
-  'where', 'when', 'was', 'played', 'i', 'my', 'his', 'her', 'their', 'position',
-])
-const TURN_NUMBER = /^#?\d+$/
-// Between the moves after `after`.
-const SEPARATORS = new Set(['then', 'and'])
-const COORDINATE = /^(?:\d{1,2}[A-Oa-o]|[A-Oa-o]\d{1,2})$/
+const COORDINATE = /^(?:\d{1,2}[A-O]|[A-O]\d{1,2})$/
 const PLAYED_WORD = /^[A-Za-z?.()]+$/
+
+/** Where `/magpie next turn` and the like move in the game the pane shows. */
+export type Navigation = 'next' | 'previous' | 'first' | 'last'
+
+/** What the person asked for, as the interpreter model reads their words, or
+ * as the simulate tool's caller states it. */
+export type Intent =
+  | {
+      action: 'sim'
+      /** An opening rack, a CGP, or a path or URL of a .cgp or .gcg; left out,
+       * the game or position the pane shows now. */
+      position?: string
+      lexicon?: string
+      /** For a rack: the moves played before it. */
+      after?: PlacedMove[]
+      /** For a GCG, which position: one of these. */
+      turn?: number
+      rack?: string
+      word?: string
+      /** With `word`: the rack it was played `from` (the default), or its
+       * player's next rack, `after` it. */
+      relation?: 'from' | 'after'
+      /** Letters that could be the rack or the word. */
+      letters?: string
+      /** MAGPIE's goto: events played, or start or end. */
+      event?: number | 'start' | 'end'
+    }
+  | { action: 'navigate'; to: Navigation }
+  | { action: 'lexicon'; lexicon: string }
+  | { action: 'reopen' }
+  | { action: 'unclear'; question: string }
+
+/** What the interpreter knows of the pane: the analysis it shows, if any,
+ * and the lexicons MAGPIE has. */
+export type InterpreterContext = {
+  current?: { label: string; source: string; lexicon: string; turn?: number; turns?: number }
+  lexica: readonly string[]
+}
+
+/** The interpreter's instructions and the person's words, with what the
+ * pane shows now. */
+export function interpreterPrompt(text: string, context: InterpreterContext): { system: string; prompt: string } {
+  const current = context.current
+  const state =
+    current === undefined
+      ? 'The pane shows nothing yet.'
+      : [
+          `The pane shows ${current.label} (from ${current.source})`,
+          current.lexicon === '' ? '' : `in ${current.lexicon}`,
+          current.turn === undefined ? '' : `at turn ${current.turn} of ${current.turns ?? '?'}`,
+        ]
+          .filter(part => part !== '')
+          .join(' ') + '.'
+  const lexica =
+    context.lexica.length === 0
+      ? 'The lexicons installed are not known; use the usual names (CSW24, NWL23).'
+      : `The lexicons installed: ${context.lexica.join(', ')}. A family name (csw, nwl, twl) means its newest one here.`
+  const system = `You read what a person typed after /magpie, a command that analyzes crossword (Scrabble) positions with the MAGPIE engine, and reply with one JSON object and nothing else.
+
+The object is one of:
+- {"action":"sim", ...} to analyze a position, with these fields as they apply:
+  "position": an opening rack (up to 7 tiles, ? for a blank, in capitals), a CGP string copied whole, or a path or URL of a .cgp or .gcg file copied exactly (keep any #13# on a cross-tables link). Leave it out to mean the game or position the pane shows now.
+  "lexicon": a lexicon name, e.g. "NWL23", only if the person names one.
+  "after": for a rack, the moves played before it, in order: [{"coordinate":"8G","word":"VAV"}]. A coordinate is a row number then a column letter for across (8G) or a column letter then a row number for down (H8), in capitals. Write a word in capitals when the person typed it all in lowercase; when they mixed cases, keep their case (a lowercase letter is a blank). A tile already on the board is a "." or in parentheses.
+  For a game (a GCG), which position, at most one of:
+  "turn": a turn number, 1 being the game's first move.
+  "rack": letters the player to move held then.
+  "word" with "relation": a word played in the game; "from" (the default) is the turn it was played on, "after" is the next rack of the player who played it.
+  "letters": letters that could be either the rack or the word, when the person does not say which.
+  "event": MAGPIE's goto, a number of events played, or "start" or "end".
+  With none of them, the game's latest position.
+- {"action":"navigate","to":"next"|"previous"|"first"|"last"} to move to another turn of the game the pane shows ("next turn", "back", "first turn", "end of game").
+- {"action":"lexicon","lexicon":"CSW24"} to analyze what the pane shows again in another lexicon, when the person names only a lexicon.
+- {"action":"reopen"} to show the pane again without a new analysis.
+- {"action":"unclear","question":"..."} when you cannot tell what they mean; ask one short question.
+
+Words like "sim", "opening", "rack", "the", "turn", "where", "played" only say what the rest is. Words are case-insensitive except as "after" says.
+
+Examples:
+"ADOPQRR" -> {"action":"sim","position":"ADOPQRR"}
+"opening rack rucksex" -> {"action":"sim","position":"RUCKSEX"}
+"rucksex nwl" -> {"action":"sim","position":"RUCKSEX","lexicon":"NWL23"}
+"AEINRST after 8g vav" -> {"action":"sim","position":"AEINRST","after":[{"coordinate":"8G","word":"VAV"}]}
+"~/games/r3.gcg turn 12" -> {"action":"sim","position":"~/games/r3.gcg","turn":12}
+"https://woogles.io/game/abc the turn where I played VODKA" -> {"action":"sim","position":"https://woogles.io/game/abc","word":"VODKA","relation":"from"}
+"game.gcg after silvered" -> {"action":"sim","position":"game.gcg","word":"SILVERED","relation":"after"}
+"game.gcg DEEILRV" -> {"action":"sim","position":"game.gcg","letters":"DEEILRV"}
+"turn 14" -> {"action":"sim","turn":14}
+"prev" -> {"action":"navigate","to":"previous"}
+"csw" -> {"action":"lexicon","lexicon":"CSW24"}`
+  return { system, prompt: `${state}\n${lexica}\n\nWhat they typed: ${text}` }
+}
+
+const NAVIGATIONS: readonly Navigation[] = ['next', 'previous', 'first', 'last']
+
+/** The interpreter's reply as an Intent; throws on anything else. */
+export function parseIntent(reply: string): Intent {
+  const json = /\{[\s\S]*\}/.exec(reply)?.[0]
+  if (json === undefined) {
+    throw new Error(`the reply held no JSON: ${reply.slice(0, 200)}`)
+  }
+  const value: unknown = JSON.parse(json)
+  if (typeof value !== 'object' || value === null) {
+    throw new Error('the reply was not an object')
+  }
+  const fields = value as Record<string, unknown>
+  const text = (name: string) => (typeof fields[name] === 'string' && fields[name] !== '' ? (fields[name] as string) : undefined)
+  switch (fields.action) {
+    case 'navigate': {
+      const to = NAVIGATIONS.find(navigation => navigation === fields.to)
+      if (to === undefined) {
+        throw new Error(`no way to move called ${String(fields.to)}`)
+      }
+      return { action: 'navigate', to }
+    }
+    case 'lexicon': {
+      const lexicon = text('lexicon')
+      if (lexicon === undefined) {
+        throw new Error('a lexicon change that names no lexicon')
+      }
+      return { action: 'lexicon', lexicon: lexicon.toUpperCase() }
+    }
+    case 'reopen':
+      return { action: 'reopen' }
+    case 'unclear':
+      return { action: 'unclear', question: text('question') ?? 'What should I sim?' }
+    case 'sim': {
+      const intent: Extract<Intent, { action: 'sim' }> = { action: 'sim' }
+      const position = text('position')
+      const lexicon = text('lexicon')
+      if (position !== undefined) {
+        intent.position = position
+      }
+      if (lexicon !== undefined) {
+        intent.lexicon = lexicon.toUpperCase()
+      }
+      if (Array.isArray(fields.after)) {
+        intent.after = fields.after.map(move => {
+          const { coordinate, word } = (move ?? {}) as Record<string, unknown>
+          return { coordinate: String(coordinate ?? ''), word: String(word ?? '') }
+        })
+      }
+      if (typeof fields.turn === 'number') {
+        intent.turn = fields.turn
+      }
+      for (const name of ['rack', 'word', 'letters'] as const) {
+        const value = text(name)
+        if (value !== undefined) {
+          intent[name] = value
+        }
+      }
+      if (fields.relation === 'after' || fields.relation === 'from') {
+        intent.relation = fields.relation
+      }
+      if (typeof fields.event === 'number' || fields.event === 'start' || fields.event === 'end') {
+        intent.event = fields.event
+      }
+      return intent
+    }
+    default:
+      throw new Error(`no action called ${String(fields.action)}`)
+  }
+}
+
+/** A lexicon name as MAGPIE spells it, if it has that lexicon (when the
+ * list is known). */
+export function checkLexicon(lexicon: string, lexica: readonly string[]): string {
+  const name = lexicon.toUpperCase()
+  if (!LEXICON_NAME.test(name)) {
+    throw new Error(`"${lexicon}" is not a lexicon name`)
+  }
+  if (lexica.length > 0 && !lexica.includes(name)) {
+    throw new Error(`MAGPIE has no ${name}; it has ${lexica.join(', ')}`)
+  }
+  return name
+}
+
+/** The request a sim intent makes: its position read for its kind, and for
+ * a game which position. Left out, the position is the one the pane shows
+ * (`previous`), in its lexicon unless the intent names another. */
+export function requestFromIntent(intent: Extract<Intent, { action: 'sim' }>, previous?: SimRequest): SimRequest {
+  const source = intent.position?.trim() ?? ''
+  const base = source !== '' ? undefined : previous
+  if (source === '' && base === undefined) {
+    throw new Error('name a position: an opening rack, a CGP, or a .cgp or .gcg path or URL')
+  }
+  const request: SimRequest =
+    base === undefined
+      ? { position: classifyPosition(source), label: positionLabel(source), source }
+      : { position: base.position, label: base.label, source: base.source }
+  const lexicon = intent.lexicon ?? base?.lexicon
+  if (lexicon !== undefined) {
+    request.lexicon = lexicon
+  }
+  const at = selectorOf(intent)
+  const position = request.position
+  if (position.kind === 'rack' || position.kind === 'cgp') {
+    if (at !== undefined) {
+      throw new Error('a turn, rack or word picks a position in a game (a GCG); this position is the whole of what to sim')
+    }
+    if (intent.after !== undefined && intent.after.length > 0) {
+      if (position.kind === 'cgp') {
+        throw new Error('a CGP is the whole position; play the moves into it instead')
+      }
+      const after = intent.after.map(placedMove)
+      request.position = { kind: 'rack', rack: position.rack, after }
+      request.label = `${position.rack} after ${after.map(move => `${move.coordinate} ${move.word}`).join(', ')}`
+    }
+    return request
+  }
+  if (at !== undefined) {
+    request.at = at
+  } else {
+    const move = base === undefined ? gameFragmentMove(source) : undefined
+    if (move !== undefined && move > 0) {
+      request.at = { kind: 'move', event: move }
+    }
+  }
+  return request
+}
+
+function placedMove(move: PlacedMove): PlacedMove {
+  const coordinate = move.coordinate.toUpperCase()
+  if (!COORDINATE.test(coordinate) || !PLAYED_WORD.test(move.word)) {
+    throw new Error(`"${move.coordinate} ${move.word}" is not a move: a square (8G, H8) and the word played there`)
+  }
+  return { coordinate, word: canonicalWord(move.word) }
+}
+
+// Which position of a game the intent names, if any.
+function selectorOf(intent: Extract<Intent, { action: 'sim' }>): Selector | undefined {
+  const asWord = (word: string) => word.replace(/[^A-Za-z]/g, '').toUpperCase()
+  if (intent.turn !== undefined) {
+    if (!Number.isInteger(intent.turn) || intent.turn < 1) {
+      throw new Error(`a turn is a number from 1, not ${intent.turn}`)
+    }
+    return { kind: 'turn', turn: intent.turn }
+  }
+  if (intent.event !== undefined) {
+    return { kind: 'goto', goto: String(intent.event) }
+  }
+  if (intent.word !== undefined) {
+    return intent.relation === 'after' ? { kind: 'after', word: asWord(intent.word) } : { kind: 'word', word: asWord(intent.word) }
+  }
+  if (intent.rack !== undefined) {
+    if (!RACK.test(intent.rack)) {
+      throw new Error(`a rack is 1 to 7 tiles, not "${intent.rack}"`)
+    }
+    return { kind: 'rack', rack: intent.rack.toUpperCase() }
+  }
+  if (intent.letters !== undefined) {
+    return { kind: 'letters', letters: asWord(intent.letters) }
+  }
+  return undefined
+}
 
 /** A word as typed, in MAGPIE's spelling: all lowercase is plain tiles
  * (`vav` is VAV); in a mixed-case word lowercase letters are blanks. */
@@ -153,176 +389,6 @@ export function positionLabel(text: string): string {
 export function gameFragmentMove(text: string): number | undefined {
   const move = /^https?:\/\/[^#]*cross-tables\.com\/[^#]*#(\d+)#?$/i.exec(text.trim())?.[1]
   return move === undefined ? undefined : Number(move)
-}
-
-function selector(kind: Selector['kind'] | undefined, value: string): Selector {
-  const upper = value.toUpperCase()
-  if (kind === 'turn' || (kind === undefined && /^#?\d+$/.test(value))) {
-    if (!/^#?\d+$/.test(value) || Number(value.replace('#', '')) < 1) {
-      throw new Error(`a turn is a number from 1, not "${value}"`)
-    }
-    return { kind: 'turn', turn: Number(value.replace('#', '')) }
-  }
-  if (kind === 'goto' || (kind === undefined && /^(start|end)$/i.test(value))) {
-    if (!/^(\d+|start|end)$/i.test(value)) {
-      throw new Error(`an event is a number, start or end, not "${value}"`)
-    }
-    return { kind: 'goto', goto: value.toLowerCase() }
-  }
-  if (!/^[A-Za-z?]+$/.test(value)) {
-    throw new Error(`"${value}" is not a turn number, a rack or a word`)
-  }
-  if (kind === 'rack') {
-    if (!RACK.test(value)) {
-      throw new Error(`a rack is 1 to 7 tiles, not "${value}"`)
-    }
-    return { kind: 'rack', rack: upper }
-  }
-  if (kind === 'word') {
-    return { kind: 'word', word: upper.replaceAll('?', '') }
-  }
-  // Too long for a rack, or holding a blank, it can only be one of them.
-  if (value.length > 7) {
-    return { kind: 'word', word: upper }
-  }
-  return value.includes('?') ? { kind: 'rack', rack: upper } : { kind: 'letters', letters: upper }
-}
-
-export type Qualifiers = { lexicon?: string; at?: Selector; after?: PlacedMove[] }
-
-/** A word as typed, without quotes, end punctuation or a possessive:
- * `"VODKA's"` is VODKA. */
-function cleanToken(token: string): string {
-  return token.replace(/^["'“‘]+|["'”’!:;]+$/g, '').replace(/['’]s$/i, '')
-}
-
-/** Reads the words after a position: a lexicon (CSW24); for a rack, the
- * moves played before it (`after 8G VAV, 9F ...`); for a GCG, which
- * position, as `12`, `turn 12`, `DEEILRV`, `rack DEEILRV`, `VODKA` or `the
- * VODKA turn` (where it was played), `before VODKA` (the same), `after
- * VODKA` (its player's next rack) or `event 23`. Filler words (`at`, `the`,
- * `where`, `played`) are skipped. */
-export function parseQualifiers(rawTokens: readonly string[]): Qualifiers {
-  const tokens = rawTokens.map(cleanToken).filter(token => token !== '')
-  const qualifiers: Qualifiers = {}
-  const isFiller = (token: string | undefined) => FILLER.has((token ?? '').toLowerCase())
-  // The next token that says something, at or after `from`.
-  const meaningfulFrom = (from: number) => {
-    let at = from
-    while (at < tokens.length && isFiller(tokens[at])) {
-      at++
-    }
-    return at
-  }
-  for (let index = 0; index < tokens.length; index++) {
-    const token = tokens[index] ?? ''
-    const lower = token.toLowerCase()
-    if (isFiller(token)) {
-      continue
-    }
-    if (LEXICON.test(token)) {
-      qualifiers.lexicon = token.toUpperCase()
-      continue
-    }
-    if ((lower === 'turn' || lower === 'move') && !TURN_NUMBER.test(tokens[meaningfulFrom(index + 1)] ?? '')) {
-      continue
-    }
-    if (lower === 'after') {
-      index = meaningfulFrom(index + 1) - 1
-      const moves: PlacedMove[] = []
-      while (COORDINATE.test(tokens[index + 1] ?? '')) {
-        const coordinate = (tokens[index + 1] ?? '').toUpperCase()
-        const word = tokens[index + 2] ?? ''
-        if (!PLAYED_WORD.test(word)) {
-          throw new Error(`${coordinate} needs the word played there: after ${coordinate} VAV`)
-        }
-        moves.push({ coordinate, word: canonicalWord(word) })
-        index += 2
-        while (SEPARATORS.has((tokens[index + 1] ?? '').toLowerCase())) {
-          index++
-        }
-      }
-      if (moves.length > 0) {
-        qualifiers.after = [...(qualifiers.after ?? []), ...moves]
-        continue
-      }
-      const word = tokens[++index]
-      if (word === undefined || !PLAYED_WORD.test(word)) {
-        throw new Error('"after" needs a move or a word: after 8G VAV, after SILVERED')
-      }
-      if (qualifiers.at !== undefined) {
-        throw new Error('name one position: a turn, a rack or a word')
-      }
-      qualifiers.at = { kind: 'after', word: word.replace(/[().]/g, '').toUpperCase() }
-      continue
-    }
-    const kind = KEYWORDS[lower]
-    if (kind !== undefined) {
-      index = meaningfulFrom(index + 1)
-    }
-    const value = kind === undefined ? token : tokens[index]
-    if (value === undefined) {
-      throw new Error(`"${token}" needs something after it: turn 12, rack DEEILRV, before SILVERED`)
-    }
-    if (qualifiers.at !== undefined) {
-      throw new Error('name one position: a turn, a rack or a word')
-    }
-    qualifiers.at = selector(kind, value)
-  }
-  return qualifiers
-}
-
-/** Reads `/magpie` arguments: a CGP whole, else a position and then its
- * qualifiers (parseQualifiers). */
-export function parseArgs(args: string): SimRequest {
-  const trimmed = args.trim()
-  if (trimmed === '') {
-    throw new Error('name a position: /magpie ADOPQRR, /magpie <cgp>, /magpie <path or URL of a .cgp or .gcg> [turn]')
-  }
-  if (isCgp(trimmed)) {
-    // After its four fields a CGP holds only opcodes, each ended by `;`.
-    const opcodes = trimmed.split(/\s+/).slice(4).join(' ')
-    if (opcodes !== '' && !opcodes.endsWith(';')) {
-      throw new Error(`a CGP is the whole position; "${opcodes}" is not its opcodes (lex CSW24;)`)
-    }
-    return { position: { kind: 'cgp', cgp: trimmed }, label: 'CGP', source: 'CGP' }
-  }
-  const [first = '', ...rest] = trimmed.split(/[\s,]+/)
-  const { lexicon, at, after } = parseQualifiers(rest)
-  const position = classifyPosition(first)
-  const request: SimRequest = { position, label: positionLabel(first), source: first }
-  if (lexicon !== undefined) {
-    request.lexicon = lexicon
-  }
-  if (position.kind === 'rack' || position.kind === 'cgp') {
-    if (at !== undefined) {
-      throw new Error('a turn, rack or word picks a position in a GCG; this position is the whole of what to sim')
-    }
-    if (after !== undefined) {
-      if (position.kind === 'cgp') {
-        throw new Error('a CGP is the whole position; play the moves into it instead')
-      }
-      position.after = after
-      request.label = `${position.rack} after ${after.map(move => `${move.coordinate} ${move.word}`).join(', ')}`
-    }
-    return request
-  }
-  if (after !== undefined) {
-    // In a game, `after 11H SILVERED` names one of its moves.
-    const [move, ...more] = after
-    if (move === undefined || more.length > 0 || at !== undefined) {
-      throw new Error('name one position: a turn, a rack, a word, or one move to come after')
-    }
-    request.at = { kind: 'after', word: move.word.replace(/[().]/g, '').toUpperCase(), coordinate: move.coordinate }
-  } else if (at !== undefined) {
-    request.at = at
-  } else {
-    const move = gameFragmentMove(first)
-    if (move !== undefined && move > 0) {
-      request.at = { kind: 'move', event: move }
-    }
-  }
-  return request
 }
 
 /** The CGP's four fields, and its `lex` opcode if it has one. */

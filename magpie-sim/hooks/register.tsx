@@ -2,35 +2,44 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { SortKey } from '../types'
-import { boardPicture } from './draw'
+import { boardPicture, ROW_TILE_STEP, tilesPicture } from './draw'
 import {
+  checkLexicon,
   choosePosition,
   DEFAULT_LEXICON,
   describePosition,
   gcgPositions,
-  isCgp,
+  interpreterPrompt,
   ITERATIONS_PER_PLAY,
   magpieRun,
-  parseArgs,
+  parseIntent,
+  requestFromIntent,
   scanRun,
   SIM_PLAYS,
   SIM_PLIES,
   sniffPosition,
   type Accelerators,
   type GcgPosition,
+  type Intent,
+  type InterpreterContext,
   type MagpieRun,
   type Selector,
   type SimRequest,
 } from './magpie'
-import { describePlay, parseSim, type Play, type Sim } from './sim'
+import { describePlay, parseSim, playTiles, type Play, type Sim } from './sim'
 import { boardSvg } from './svg'
-import { PICTURE_HEIGHT, PICTURE_WIDTH } from './theme'
+import { PICTURE_HEIGHT, PICTURE_WIDTH, SQUARE } from './theme'
 import { parseFont, type Font } from './truetype'
 
 const PLUGIN = 'magpie-sim'
 const PANE = 'magpie-results'
 // Where MAGPIE is installed unless the magpieDir option says otherwise.
 const DEFAULT_MAGPIE_DIR = '~/magpie'
+// The model that reads what the person typed after /magpie: quick, and
+// a short JSON reply is all it writes.
+const INTERPRETER_MODEL = 'haiku'
+const INTERPRETER_MAX_TOKENS = 400
+const INTERPRETER_TIMEOUT_MS = 30_000
 // Ten minutes, the most $.process.run allows.
 const RUN_TIMEOUT_MS = 600_000
 // The TUI's font (tui/assets/magpie.ttf), under its own licence beside it.
@@ -44,8 +53,8 @@ const PLAYS_REPORTED = 10
 // are wide, so 44 x 24 keeps the 596 x 638 picture's tiles near square.
 const BOARD_COLUMNS = 44
 const BOARD_ROWS = 24
-// Rows the table draws above its plays: the summary, the keys, the headings.
-const TABLE_CHROME_ROWS = 3
+// Rows the table draws above its plays: the summary and the headings.
+const TABLE_CHROME_ROWS = 2
 // About the full table's width (tableLayout measures it per sim), for the
 // pane's opening size: room for the board beside it.
 const TYPICAL_TABLE_COLUMNS = 80
@@ -60,10 +69,12 @@ const simFile = atom({ plugin: 'magpie-sim', key: 'simFile' } as const, '')
 const simText = atom({ plugin: 'magpie-sim', key: 'simText' } as const, '')
 const running = atom({ plugin: 'magpie-sim', key: 'running' } as const, '')
 const runError = atom({ plugin: 'magpie-sim', key: 'runError' } as const, '')
+const current = atom({ plugin: 'magpie-sim', key: 'current' } as const, '')
 
-// How many plays the table showed when last drawn, so a key press moves the
-// window as far as the person can see. The drawing clamps it again.
+// How many plays the table showed when last drawn, and how many it has, so
+// the wheel scrolls no further than its end. The drawing clamps it again.
 let lastRoom = 10
+let lastCount = 0
 let lastPictureMs = 0
 // Whether a terminal has drawn the pane, so a move seen only on the other
 // surfaces skips the RGBA picture they would not show.
@@ -115,6 +126,7 @@ export async function loadSim($: EngineInterface): Promise<Sim> {
   const source = text !== '' ? text : await simPath($)
   if (simLoad?.source !== source) {
     pictures.clear()
+    rowPictures.clear()
     const sim = text !== '' ? Promise.resolve().then(() => parseSim(text)) : $.fs.read(source).then(parseSim)
     simLoad = { source, sim }
     sim.catch(() => {
@@ -237,12 +249,26 @@ type Resolved = { kind: 'rack'; rack: string } | { kind: 'cgp'; cgp: string } | 
 /** A sim ready to run: the position in MAGPIE's terms, and for a GCG the
  * `goto` that reaches it. */
 type Plan = {
+  request: SimRequest
   resolved: Resolved
   lexicon?: string
   goto?: string
   label: string
   where: Magpie
   threadCount: number
+  /** For a game: the turn chosen, and how many it has. */
+  turn?: number
+  turns?: number
+}
+
+/** What the pane shows, for `/magpie next turn` and `/magpie csw`: the
+ * request that made it (a game's at its turn), its lexicon, and the game's
+ * turn and turns. Kept as JSON in the `current` atom. */
+type Current = { request: SimRequest; label: string; lexicon: string; turn?: number; turns?: number }
+
+async function readCurrent($: EngineInterface): Promise<Current | undefined> {
+  const json = await read($, current)
+  return json === '' ? undefined : (JSON.parse(json) as Current)
 }
 
 async function execute($: EngineInterface, where: Magpie, label: string, run: MagpieRun) {
@@ -271,6 +297,8 @@ async function planSim($: EngineInterface, request: SimRequest): Promise<{ plan:
   let lexicon = knownLexicon
   let goto: string | undefined
   let label = request.label
+  let turn: number | undefined
+  let turns: number | undefined
   if (resolved.kind === 'gcg') {
     // Every position of the game, to find the one asked for. The scan also
     // learns whether the GCG names its lexicon (one MAGPIE fetched is
@@ -290,15 +318,27 @@ async function planSim($: EngineInterface, request: SimRequest): Promise<{ plan:
     if ('candidates' in choice) {
       return { candidates: choice.candidates }
     }
+    turns = positions.length
     if ('goto' in choice) {
       goto = choice.goto
       label = `${label} event ${goto}`
     } else {
       goto = String(choice.position.events)
-      label = `${label} turn ${choice.position.turn}`
+      turn = choice.position.turn
+      label = `${label} turn ${turn}`
     }
   }
-  return { plan: { resolved, lexicon, goto, label, where, threadCount: await threads($) } }
+  const plan: Plan = { request, resolved, goto, label, where, threadCount: await threads($) }
+  if (lexicon !== undefined) {
+    plan.lexicon = lexicon
+  }
+  if (turns !== undefined) {
+    plan.turns = turns
+  }
+  if (turn !== undefined) {
+    plan.turn = turn
+  }
+  return { plan }
 }
 
 /** What the person's turn, rack or word was, for the question. */
@@ -348,6 +388,18 @@ async function runPlan($: EngineInterface, plan: Plan): Promise<Sim> {
     }
     note(`${plan.label}: ${sim.plays.length} plays in ${((Date.now() - started) / 1000).toFixed(1)} s`)
     await update($, simText, () => text)
+    // A game is kept at its turn, so moving from it and changing its
+    // lexicon start from there.
+    const shown: Current = {
+      request: plan.turn === undefined ? plan.request : { ...plan.request, at: { kind: 'turn', turn: plan.turn } },
+      label: plan.label,
+      lexicon: run.lexicon !== '' ? run.lexicon : (plan.lexicon ?? ''),
+    }
+    if (plan.turn !== undefined && plan.turns !== undefined) {
+      shown.turn = plan.turn
+      shown.turns = plan.turns
+    }
+    await update($, current, () => JSON.stringify(shown))
     await update($, selectedId, () => '')
     await update($, windowTop, () => 0)
     return sim
@@ -387,29 +439,39 @@ const COLUMNS: readonly Column[] = [
 // The selection marker and the sim's rank, before the columns.
 const RANK_WIDTH = 5
 
-/** The table's columns, each as wide as its widest cell, or its title with
- * room for a sort arrow, and the width of a whole row. */
-export type TableLayout = { columns: readonly { column: Column; width: number }[]; width: number }
+// A tile in a row of the table: two terminal columns, one row.
+const TILE_COLUMNS = 2
 
-export function tableLayout(plays: readonly Play[], isCompact: boolean): TableLayout {
+/** The table's columns, each as wide as its widest cell, or its title with
+ * room for a sort arrow, and the width of a whole row. With `tiles`, the
+ * Play column (the first) spells each play as its square and a picture of
+ * its tiles: the widest square label, and room for the most tiles. */
+export type TableLayout = {
+  columns: readonly { column: Column; width: number }[]
+  width: number
+  tiles?: { labelWidth: number; slots: number }
+}
+
+export function tableLayout(plays: readonly Play[], isCompact: boolean, isTiled = false): TableLayout {
+  const spelled = plays.map(playTiles)
+  const tiles = isTiled
+    ? {
+        labelWidth: Math.max(0, ...spelled.map(play => play.label.length)),
+        slots: Math.max(1, ...spelled.map(play => play.tiles.length)),
+      }
+    : undefined
   const columns = (isCompact ? COLUMNS.filter(column => column.isCompact) : COLUMNS).map(column => ({
     column,
     width: Math.max(
       column.title.length + (column.sort === undefined ? 0 : 1),
-      ...plays.map(play => column.cell(play).length),
+      ...(tiles !== undefined && column.sort === 'play'
+        ? [tiles.labelWidth + 1 + TILE_COLUMNS * tiles.slots]
+        : plays.map(play => column.cell(play).length)),
     ),
   }))
-  return { columns, width: columns.reduce((total, { width }) => total + 1 + width, RANK_WIDTH) }
+  const width = columns.reduce((total, { width: columnWidth }) => total + 1 + columnWidth, RANK_WIDTH)
+  return tiles === undefined ? { columns, width } : { columns, width, tiles }
 }
-
-const SORT_KEYS: readonly { key: SortKey; hotkey: string; label: string }[] = [
-  { key: 'win', hotkey: 'w', label: 'win%' },
-  { key: 'equity', hotkey: 'e', label: 'equity' },
-  { key: 'score', hotkey: 's', label: 'score' },
-  { key: 'static', hotkey: 't', label: 'static' },
-  { key: 'iterations', hotkey: 'i', label: 'iters' },
-  { key: 'play', hotkey: 'a', label: 'a-z' },
-]
 
 function sortValue(play: Play, key: SortKey): number {
   switch (key) {
@@ -454,9 +516,30 @@ export function headerLine(layout: TableLayout, key: SortKey, descending: boolea
 }
 
 // The rank is the sim's own, by win%, whatever the table's order.
+function rankCell(play: Play, isSelected: boolean): string {
+  return (isSelected ? '▶' : ' ') + String(play.rank).padStart(RANK_WIDTH - 1)
+}
+
 export function rowLine(layout: TableLayout, play: Play, isSelected: boolean): string {
   const cells = layout.columns.map(({ column, width }) => pad(column.cell(play), column, width))
-  return [(isSelected ? '▶' : ' ') + String(play.rank).padStart(RANK_WIDTH - 1), ...cells].join(' ')
+  return [rankCell(play, isSelected), ...cells].join(' ')
+}
+
+/** A tiled row's text either side of its tiles' picture: the rank and the
+ * play's square, then the rest of the columns, so the row is as wide as
+ * the header. */
+export function rowParts(layout: TableLayout, play: Play, isSelected: boolean): { before: string; after: string } {
+  const [playColumn, ...rest] = layout.columns
+  if (layout.tiles === undefined || playColumn === undefined) {
+    return { before: rowLine(layout, play, isSelected), after: '' }
+  }
+  const spelled = layout.tiles.labelWidth + 1 + TILE_COLUMNS * layout.tiles.slots
+  return {
+    before: `${rankCell(play, isSelected)} ${playTiles(play).label.padEnd(layout.tiles.labelWidth)} `,
+    after:
+      ' '.repeat(playColumn.width - spelled) +
+      rest.map(({ column, width }) => ` ${pad(column.cell(play), column, width)}`).join(''),
+  }
 }
 
 export function summaryLine(sim: Sim): string {
@@ -510,28 +593,38 @@ function selectedIndex(sorted: readonly Play[], id: string): number {
   return Math.max(0, sorted.findIndex(play => play.id === id))
 }
 
-async function moveBy($: EngineInterface, by: number) {
-  const sim = await loadSim($)
-  const sorted = await sortedPlays($, sim)
-  const current = selectedIndex(sorted, await read($, selectedId))
-  const index = Math.min(sorted.length - 1, Math.max(0, current + by))
-  const next = sorted[index]
-  if (next === undefined || index === current) {
+/** A row's click: its play on the board. */
+async function selectPlay($: EngineInterface, id: string) {
+  if ((await read($, selectedId)) === id) {
     return
   }
-  // Swap the picture at the frame rate; the redraw the writes below cause
-  // draws the same source, which sends nothing. Refused where no terminal
-  // picture is mounted (the other surfaces draw an Svg), and a failed swap
-  // must not stop the move: that redraw draws the new picture anyway.
-  if (isTerminalDrawing) {
+  // Swap the picture at once; the redraw the write below causes draws the
+  // same source, which sends nothing. Refused where no terminal picture is
+  // mounted (the other surfaces draw an Svg), and a failed swap must not
+  // stop the selection: that redraw draws the new picture anyway.
+  const sim = await loadSim($)
+  const play = sim.plays.find(candidate => candidate.id === id)
+  if (play !== undefined && isTerminalDrawing) {
     try {
-      await $.ui.blit({ requestId: PANE, key: 'board', source: pictureSource(await loadFont($), sim, next) })
+      await $.ui.blit({ requestId: PANE, key: 'board', source: pictureSource(await loadFont($), sim, play) })
     } catch {
       // The redraw below shows it.
     }
   }
-  await update($, selectedId, () => next.id)
-  await update($, windowTop, top => windowStart(top, index, lastRoom, sorted.length))
+  await update($, selectedId, () => id)
+}
+
+// A row's tiles as RGBA bytes, by play, for the sim loaded now.
+const rowPictures = new Map<string, string>()
+
+function rowTilesSource(font: Font, play: Play, slots: number) {
+  const key = `${slots}:${play.id}`
+  let rgba = rowPictures.get(key)
+  if (rgba === undefined) {
+    rgba = tilesPicture(font, playTiles(play).tiles, slots).pixels.toBase64()
+    rowPictures.set(key, rgba)
+  }
+  return { rgba, width: slots * ROW_TILE_STEP, height: SQUARE }
 }
 
 async function sortBy($: EngineInterface, key: SortKey) {
@@ -569,6 +662,114 @@ async function currentTitle($: EngineInterface): Promise<string> {
 
 const SIM_SHAPE = `${SIM_PLAYS} plays × ${ITERATIONS_PER_PLAY.toLocaleString('en-US')} iterations, ${SIM_PLIES} plies`
 
+let lexicaList: Promise<string[]> | null = null
+
+// The lexicons the MAGPIE directory has (its .kwg files); none known for the
+// magpie on PATH.
+async function lexica($: EngineInterface): Promise<string[]> {
+  lexicaList ??= findMagpie($).then(async where =>
+    where.cwd === undefined
+      ? []
+      : (await $.fs.list(`${where.cwd}/data/lexica`).catch(() => []))
+          .map(entry => /^(.+)\.kwg$/.exec(entry.name)?.[1])
+          .filter((name): name is string => name !== undefined)
+          .sort(),
+  )
+  return lexicaList
+}
+
+/** What the person typed after /magpie, read by a model into an Intent with
+ * what the pane shows and the lexicons at hand. */
+async function interpret($: EngineInterface, text: string): Promise<Intent> {
+  const shown = await readCurrent($)
+  const context: InterpreterContext = { lexica: await lexica($) }
+  if (shown !== undefined) {
+    context.current = {
+      label: shown.label,
+      source: shown.request.source,
+      lexicon: shown.lexicon,
+      ...(shown.turn === undefined ? {} : { turn: shown.turn, turns: shown.turns }),
+    }
+  }
+  const { system, prompt } = interpreterPrompt(text, context)
+  const reply = await $.model.complete({
+    model: INTERPRETER_MODEL,
+    system,
+    prompt,
+    maxTokens: INTERPRETER_MAX_TOKENS,
+    timeoutMs: INTERPRETER_TIMEOUT_MS,
+  })
+  if (!reply.isAnswered) {
+    throw new Error(`the model reading it did not answer (${reply.reason})`)
+  }
+  note(`read "${text}" as ${reply.text.trim()}`)
+  return parseIntent(reply.text)
+}
+
+/** The request an intent makes, against what the pane shows; or the answer
+ * itself, when there is nothing to run (a question, the pane reopened, a
+ * lexicon already in use, the end of the game reached). */
+async function requestFor(
+  $: EngineInterface,
+  intent: Intent,
+): Promise<{ request: SimRequest; message?: string } | { answer: string; reopen?: true }> {
+  const shown = await readCurrent($)
+  switch (intent.action) {
+    case 'unclear':
+      return { answer: intent.question }
+    case 'reopen':
+      return { answer: 'Opened the MAGPIE sim pane.', reopen: true }
+    case 'navigate': {
+      if (shown?.turn === undefined || shown.turns === undefined) {
+        return { answer: 'The pane shows no game to move through: sim a GCG first (/magpie <path or URL of a .gcg>).' }
+      }
+      const turn =
+        intent.to === 'next'
+          ? shown.turn + 1
+          : intent.to === 'previous'
+            ? shown.turn - 1
+            : intent.to === 'first'
+              ? 1
+              : shown.turns
+      if (turn < 1 || turn > shown.turns) {
+        return { answer: `Turn ${shown.turn} is the game's ${turn < 1 ? 'first' : 'last'}.` }
+      }
+      if (turn === shown.turn) {
+        return { answer: `The pane already shows turn ${turn}.`, reopen: true }
+      }
+      return { request: { ...shown.request, at: { kind: 'turn', turn } } }
+    }
+    case 'lexicon': {
+      if (shown === undefined) {
+        return { answer: 'There is nothing to analyze again yet: sim a position first.' }
+      }
+      const lexicon = checkLexicon(intent.lexicon, await lexica($))
+      if (lexicon === shown.lexicon) {
+        return { answer: `Already using ${lexicon} for ${shown.label}.`, reopen: true }
+      }
+      return {
+        request: { ...shown.request, lexicon },
+        message: `Analyzing ${shown.label} again in ${lexicon}${shown.lexicon === '' ? '' : ` (was ${shown.lexicon})`}`,
+      }
+    }
+    case 'sim': {
+      const request = requestFromIntent(intent, shown?.request)
+      if (request.lexicon !== undefined) {
+        request.lexicon = checkLexicon(request.lexicon, await lexica($))
+      }
+      return { request }
+    }
+  }
+}
+
+/** What the person's turn, rack or word was, for the question. */
+function askWhich(request: SimRequest, candidates: readonly GcgPosition[]): string[] {
+  return [
+    `${selectorText(request.at)} fits ${candidates.length} positions in ${request.label}:`,
+    ...candidateLines(candidates),
+  ]
+}
+
 export const register: Register = (on, options) => {
   magpieDir = typeof options.magpieDir === 'string' ? options.magpieDir.trim().replace(/\/+$/, '') : DEFAULT_MAGPIE_DIR
 
@@ -579,29 +780,43 @@ export const register: Register = (on, options) => {
       .register({
         name: 'magpie',
         description:
-          'Sim a position in MAGPIE and show it in a pane: /magpie <opening rack | CGP | .cgp/.gcg path or URL> [lexicon] [GCG turn number, rack or word]; no argument reopens the pane',
+          'Sim a crossword position in MAGPIE and show it in a pane, in your own words: an opening rack, a CGP, a .gcg path or URL and which turn, a lexicon, next turn, csw; no argument reopens the pane',
       })
       .catch((error: unknown) => note(`/magpie refused: ${String(error)}`))
     await $.tool
       .register({
         name: 'simulate',
-        description: `Runs a MAGPIE Monte Carlo simulation of a crossword (Scrabble) position and shows the results in a pane beside the conversation, with a board picture of each play: ${SIM_SHAPE}, using WMP, RIT and WIT where the lexicon has them. Use it whenever the person asks to sim, simulate or analyze a rack or position. Takes a few seconds to a minute; one at a time. Returns the top plays by win%.`,
+        description: `Runs a MAGPIE Monte Carlo simulation of a crossword (Scrabble) position and shows the results in a pane beside the conversation, with a board picture of each play: ${SIM_SHAPE}, using WMP, RIT and WIT where the lexicon has them. Use it whenever the person asks to sim, simulate or analyze a rack or position. Takes a few seconds to a minute; one at a time. Returns the top plays by win%. For a game, at most one of turn, rack, word, letters or event picks the position; when it fits more than one, the tool lists them instead of running: ask the person which.`,
         inputSchema: {
           type: 'object',
           properties: {
             position: {
               type: 'string',
               description:
-                'An opening rack (ADOPQRR, ? for a blank), a CGP string, or a path or URL of a .cgp or .gcg file; woogles.io and cross-tables.com game links work',
+                'An opening rack (ADOPQRR, ? for a blank), a CGP string, or a path or URL of a .cgp or .gcg file; woogles.io and cross-tables.com game links work (a cross-tables viewer link\'s #13# picks the turn of its move 13). Left out: the game or position the pane shows now.',
             },
-            lexicon: { type: 'string', description: 'CSW24 unless a CGP or GCG names one; e.g. NWL23' },
-            at: {
-              type: 'string',
+            lexicon: { type: 'string', description: 'e.g. NWL23; CSW24 unless a CGP or GCG names one' },
+            after: {
+              type: 'array',
               description:
-                "For a rack: the moves played before it, `after 8G VAV, 9F .IE` (an all-lowercase word is plain tiles). For a GCG, which position: a turn number (1 is the game's first move), a rack the player to move held, or a word: `VODKA`, `the VODKA turn` and `before VODKA` are the rack VODKA was played from, `after VODKA` that player's next rack; `turn 12`, `rack DEEILRV`, `event 23` (MAGPIE's goto) say which kind. A cross-tables viewer link's `#13#` picks its position. Left out: the latest position with a player to move. When it fits more than one position the tool lists them instead of running: ask the person which.",
+                'For a rack: the moves played before it, in order. Coordinates in capitals (8G across, H8 down); a word in capitals except a blank in lowercase; a board tile as "." or in parentheses.',
+              items: {
+                type: 'object',
+                properties: { coordinate: { type: 'string' }, word: { type: 'string' } },
+                required: ['coordinate', 'word'],
+              },
             },
+            turn: { type: 'integer', description: "For a game: a turn number, 1 being the game's first move" },
+            rack: { type: 'string', description: 'For a game: a rack the player to move held' },
+            word: { type: 'string', description: 'For a game: a word played in it' },
+            relation: {
+              type: 'string',
+              enum: ['from', 'after'],
+              description: "With word: the turn it was played on (from, the default), or its player's next rack (after)",
+            },
+            letters: { type: 'string', description: 'For a game: letters that could be the rack or the word' },
+            event: { type: 'integer', description: "For a game: MAGPIE's goto, the number of events played" },
           },
-          required: ['position'],
         },
         isDeferred: false,
       })
@@ -637,16 +852,17 @@ export const register: Register = (on, options) => {
         ].join('\n'),
       }
     }
-    if (args === '') {
-      const opened = await openPane($, await currentTitle($), true)
-      note(`/magpie: ${opened}`)
-      return { text: `${opened}. j/k or the arrows move, w e s t i a sort, Esc returns to the prompt.` }
-    }
-    let request: SimRequest
+    let found: Awaited<ReturnType<typeof requestFor>>
     let planned: Awaited<ReturnType<typeof planSim>>
     try {
-      request = parseArgs(args)
-      planned = await planSim($, request)
+      found = args === '' ? { answer: 'Opened the MAGPIE sim pane.', reopen: true } : await requestFor($, await interpret($, args))
+      if ('answer' in found) {
+        if (found.reopen === true) {
+          await openPane($, await currentTitle($), true)
+        }
+        return { text: found.answer }
+      }
+      planned = await planSim($, found.request)
     } catch (error) {
       return { text: error instanceof Error ? error.message : String(error) }
     }
@@ -654,9 +870,8 @@ export const register: Register = (on, options) => {
       const first = planned.candidates[0]
       return {
         text: [
-          `${selectorText(request.at)} fits ${planned.candidates.length} positions in ${request.label}:`,
-          ...candidateLines(planned.candidates),
-          `Say which: /magpie ${request.source} turn ${first?.turn ?? 1}`,
+          ...askWhich(found.request, planned.candidates),
+          `Say which, e.g. /magpie ${found.request.source} turn ${first?.turn ?? 1}`,
         ].join('\n'),
       }
     }
@@ -665,25 +880,22 @@ export const register: Register = (on, options) => {
     // The sim outlives the command: the pane shows it running, then its
     // results, or what went wrong.
     void runPlan($, plan).catch(() => undefined)
-    return { text: `${opened}. Simulating ${plan.label}: ${SIM_SHAPE}. The pane fills in when it finishes.` }
+    return {
+      text: `${opened}. ${found.message ?? `Simulating ${plan.label}`}: ${SIM_SHAPE}. The pane fills in when it finishes.`,
+    }
   })
 
   on('tool.call', { tool: 'mcp__magpie-sim__simulate' }, async ($, e) => {
-    const input = e as { position?: unknown; lexicon?: unknown; at?: unknown }
-    if (typeof input.position !== 'string' || input.position.trim() === '') {
-      return { deny: `${PLUGIN}: name a position to sim` }
-    }
+    const input = e as Record<string, unknown>
     let request: SimRequest
     let planned: Awaited<ReturnType<typeof planSim>>
     try {
-      // The same reading as /magpie's: a CGP whole, else the position and
-      // what `at` says of it.
-      const position = input.position.trim()
-      const at = typeof input.at === 'string' || typeof input.at === 'number' ? String(input.at).trim() : ''
-      request = parseArgs(isCgp(position) || at === '' ? position : `${position} ${at}`)
-      if (typeof input.lexicon === 'string' && input.lexicon !== '') {
-        request.lexicon = input.lexicon.toUpperCase()
+      // The caller is a model already: its fields are the intent.
+      const found = await requestFor($, parseIntent(JSON.stringify({ ...input, action: 'sim' })))
+      if ('answer' in found) {
+        return { result: found.answer }
       }
+      request = found.request
       planned = await planSim($, request)
     } catch (error) {
       return { deny: `${PLUGIN}: ${error instanceof Error ? error.message : String(error)}` }
@@ -691,9 +903,9 @@ export const register: Register = (on, options) => {
     if ('candidates' in planned) {
       return {
         result: [
-          `Not run: ${selectorText(request.at)} fits ${planned.candidates.length} positions in ${request.label}:`,
-          ...candidateLines(planned.candidates),
-          'Ask the person which they mean, then call again with `at` set to its turn (e.g. "turn 12").',
+          'Not run.',
+          ...askWhich(request, planned.candidates),
+          'Ask the person which they mean, then call again with `turn` set to it.',
         ].join('\n'),
       }
     }
@@ -740,11 +952,11 @@ export const register: Register = (on, options) => {
     }
   }).catch(($, e, next) => (next.called ? next(e) : { deny: `${PLUGIN}: showing the sim failed` }))
 
-  // The arrows and the wheel move the selection rather than the body: the
-  // table draws only the plays that fit, so there is nothing else to scroll.
+  // The wheel scrolls the table's rows: it draws only the plays that fit,
+  // so there is nothing else to scroll. The selection stays where it is.
   on('ui.scroll', { requestId: PANE }, async ($, e) => {
     if (e.by !== 0) {
-      await moveBy($, Math.sign(e.by) * Math.min(Math.abs(e.by), lastRoom))
+      await update($, windowTop, top => Math.min(Math.max(0, top + e.by), Math.max(0, lastCount - lastRoom)))
     }
     return {}
   }).catch(($, e, next) => next(e)) // a failed move lets the body scroll as usual
@@ -791,27 +1003,35 @@ export const register: Register = (on, options) => {
         return <Text dimColor>No plays.</Text>
       }
 
+      let font: Font | null = null
+      let fontProblem: string | null = null
+      try {
+        font = await loadFont($)
+      } catch (fontError) {
+        fontProblem = `Could not read ${FONT_FILE}: ${String(fontError)}`
+      }
+      // The terminal spells each play in tiles, as pictures.
+      const isTiled = e.surface === 'terminal' && font !== null
+
       // The full table where it fits, else its main columns; the board
       // beside it where both fit, else above.
-      const fullLayout = tableLayout(sim.plays, false)
-      const layout = e.props.bodyColumns < fullLayout.width ? tableLayout(sim.plays, true) : fullLayout
+      const fullLayout = tableLayout(sim.plays, false, isTiled)
+      const layout = e.props.bodyColumns < fullLayout.width ? tableLayout(sim.plays, true, isTiled) : fullLayout
       const isWide = e.props.bodyColumns >= BOARD_COLUMNS + 2 + layout.width
       const besideBoard = isWide ? 0 : BOARD_ROWS + 1
       const statusRows = status === null ? 0 : 1
       const room = Math.max(3, e.props.scroll.bodyRows - TABLE_CHROME_ROWS - besideBoard - statusRows)
       lastRoom = room
-      const top = windowStart(await read($, windowTop), index, room, sorted.length)
+      lastCount = sorted.length
+      // Where the wheel left the rows, whichever play is selected.
+      const top = Math.min(Math.max(0, await read($, windowTop)), Math.max(0, sorted.length - room))
       const shown = sorted.slice(top, top + room)
 
       const alt = describePlay(selected)
       let picture = <Text dimColor>{alt}</Text>
-      let font: Font | null = null
-      try {
-        font = await loadFont($)
-      } catch (fontError) {
-        picture = <Text color="red">{`Could not read ${FONT_FILE}: ${String(fontError)}`}</Text>
-      }
-      if (font !== null) {
+      if (fontProblem !== null) {
+        picture = <Text color="red">{fontProblem}</Text>
+      } else if (font !== null) {
         if (e.surface === 'terminal') {
           isTerminalDrawing = true
           const { Image } = $.ui.resolve(e)
@@ -827,6 +1047,58 @@ export const register: Register = (on, options) => {
         }
       }
 
+      // Each heading that sorts is a button: again to flip.
+      const header = (
+        <Box key="header" flexDirection="row">
+          <Text bold>{'#'.padStart(RANK_WIDTH)}</Text>
+          {layout.columns.map(({ column, width }) => {
+            const arrow = column.sort === key ? (descending ? '▼' : '▲') : ''
+            const title = ` ${pad(column.title + arrow, column, width)}`
+            const sort = column.sort
+            return sort === undefined ? (
+              <Text bold>{title}</Text>
+            ) : (
+              <Button key={`sort-${sort}`} plain onPress={() => sortBy($, sort)}>
+                <Text bold>{title}</Text>
+              </Button>
+            )
+          })}
+        </Box>
+      )
+
+      // Each row is a button that puts its play on the board; a tiled row's
+      // tiles sit between its two halves, a picture no click reaches.
+      const TileImage = e.surface === 'terminal' ? $.ui.resolve(e).Image : undefined
+      const rows = shown.map(play => {
+        const isSelected = play.id === selected.id
+        const pick = () => selectPlay($, play.id)
+        if (layout.tiles === undefined || font === null || TileImage === undefined) {
+          return (
+            <Button key={`pick-${play.id}`} plain onPress={pick}>
+              <Text inverse={isSelected}>{rowLine(layout, play, isSelected)}</Text>
+            </Button>
+          )
+        }
+        const parts = rowParts(layout, play, isSelected)
+        return (
+          <Box key={`row-${play.id}`} flexDirection="row">
+            <Button key={`pick-${play.id}`} plain onPress={pick}>
+              <Text inverse={isSelected}>{parts.before}</Text>
+            </Button>
+            <TileImage
+              key={`tiles-${play.id}`}
+              source={rowTilesSource(font, play, layout.tiles.slots)}
+              columns={TILE_COLUMNS * layout.tiles.slots}
+              rows={1}
+              alt={play.id}
+            />
+            <Button key={`pick-${play.id}-numbers`} plain onPress={pick}>
+              <Text inverse={isSelected}>{parts.after}</Text>
+            </Button>
+          </Box>
+        )
+      })
+
       const timing = e.surface === 'terminal' ? ` · picture ${lastPictureMs} ms` : ''
       const table = (
         <Box flexDirection="column">
@@ -834,33 +1106,8 @@ export const register: Register = (on, options) => {
           <Text dimColor wrap="truncate-end">
             {`${summaryLine(sim)} · ${top + 1}-${top + shown.length} of ${sorted.length}${timing}`}
           </Text>
-          <Box flexDirection="row" columnGap={1} flexWrap="wrap">
-            <Button key="down" hotkey="j" plain onPress={() => moveBy($, 1)}>
-              down
-            </Button>
-            <Button key="up" hotkey="k" plain onPress={() => moveBy($, -1)}>
-              up
-            </Button>
-            {SORT_KEYS.map(sort => (
-              <Button
-                key={`sort-${sort.key}`}
-                hotkey={sort.hotkey}
-                plain
-                dimColor={sort.key !== key}
-                onPress={() => sortBy($, sort.key)}
-              >
-                {sort.label}
-              </Button>
-            ))}
-          </Box>
-          <Text bold wrap="truncate-end">
-            {headerLine(layout, key, descending)}
-          </Text>
-          {shown.map(play => (
-            <Text inverse={play.id === selected.id} wrap="truncate-end">
-              {rowLine(layout, play, play.id === selected.id)}
-            </Text>
-          ))}
+          {header}
+          {rows}
         </Box>
       )
 

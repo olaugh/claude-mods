@@ -1,9 +1,9 @@
 // Draws the board as RGBA pixels for the terminal's <Image>: the layout of
 // board.ts, its glyphs rasterized from the font and blended in.
 
-import { drawBoard, type Canvas } from './board'
+import { drawBoard, drawTile, tileColors, type Canvas } from './board'
 import type { Play } from './sim'
-import { PICTURE_HEIGHT, PICTURE_WIDTH, type Rgb } from './theme'
+import { PICTURE_HEIGHT, PICTURE_WIDTH, PREVIEW_BG, SQUARE, TILE_BG, type Rgb } from './theme'
 import { rasterize, type Font, type GlyphBitmap } from './truetype'
 
 export type Picture = { width: number; height: number; pixels: Uint8Array }
@@ -85,5 +85,32 @@ export function boardPicture(font: Font, board: readonly string[] | null, rack: 
     pixels: new Uint8Array(PICTURE_WIDTH * PICTURE_HEIGHT * 4),
   }
   drawBoard(pixelCanvas(picture, font), font, board, rack, play)
+  return picture
+}
+
+// Between two tiles of a row, in pixels; each tile and its gap fill two
+// terminal columns.
+const ROW_TILE_GAP = 4
+export const ROW_TILE_STEP = SQUARE + ROW_TILE_GAP
+
+/** A play's tiles in a row, `slots` wide so every row of the table lines
+ * up: the tiles it plays bright, as the board's preview draws them, the
+ * board's own it plays through darker, blanks grey; the rest left clear. */
+export function tilesPicture(font: Font, tiles: readonly { letter: string; isThrough: boolean }[], slots: number): Picture {
+  const picture: Picture = {
+    width: slots * ROW_TILE_STEP,
+    height: SQUARE,
+    pixels: new Uint8Array(slots * ROW_TILE_STEP * SQUARE * 4),
+  }
+  const canvas = pixelCanvas(picture, font)
+  for (const [index, { letter, isThrough }] of tiles.entries()) {
+    drawTile(canvas, font, index * ROW_TILE_STEP + ROW_TILE_GAP / 2, 0, {
+      letter,
+      ...tileColors(letter, isThrough ? TILE_BG : PREVIEW_BG),
+      isBold: !isThrough,
+      hasScore: false,
+      isLarge: true,
+    })
+  }
   return picture
 }

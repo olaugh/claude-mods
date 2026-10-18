@@ -3,17 +3,21 @@ import { expect, test } from 'claude-code/testing'
 
 import {
   canonicalWord,
+  checkLexicon,
   choosePosition,
   classifyPosition,
   describePosition,
   gcgPositions,
+  interpreterPrompt,
   magpieRun,
-  parseArgs,
+  parseIntent,
   positionLabel,
+  requestFromIntent,
   scanRun,
   splitCgp,
   tilesFromRack,
   type Choice,
+  type Intent,
 } from '../hooks/magpie'
 import { headerLine, reportLines, rowLine, tableLayout } from '../hooks/register'
 import { parseSim, placedTiles, rackGhosts } from '../hooks/sim'
@@ -71,37 +75,66 @@ test('positions are told apart', () => {
   expect(() => classifyPosition('12345')).toThrow()
 })
 
-test('/magpie arguments: a position, then a lexicon, and for a GCG which position', () => {
-  expect(parseArgs('ADOPQRR NWL23')).toEqual({
+const sim = (fields: Omit<Extract<Intent, { action: 'sim' }>, 'action'>) => requestFromIntent({ action: 'sim', ...fields })
+
+test('a sim intent becomes a request: the position read for its kind, and which', () => {
+  expect(sim({ position: 'ADOPQRR', lexicon: 'NWL23' })).toEqual({
     position: { kind: 'rack', rack: 'ADOPQRR' },
     label: 'ADOPQRR',
     source: 'ADOPQRR',
     lexicon: 'NWL23',
   })
-  const at = (args: string) => parseArgs(`~/games/game.gcg ${args}`).at
-  expect(at('12')).toEqual({ kind: 'turn', turn: 12 })
-  expect(at('turn 12')).toEqual({ kind: 'turn', turn: 12 })
-  expect(at('at turn #12 CSW21')).toEqual({ kind: 'turn', turn: 12 })
-  expect(parseArgs('~/games/game.gcg at turn #12 CSW21').lexicon).toBe('CSW21')
-  expect(at('DEEILRV')).toEqual({ kind: 'letters', letters: 'DEEILRV' })
-  expect(at('rack deeilrv')).toEqual({ kind: 'rack', rack: 'DEEILRV' })
-  expect(at('aeinst?')).toEqual({ kind: 'rack', rack: 'AEINST?' })
-  expect(at('before SILVERED')).toEqual({ kind: 'word', word: 'SILVERED' })
-  expect(at('SILVERED')).toEqual({ kind: 'word', word: 'SILVERED' })
-  expect(at('event 23')).toEqual({ kind: 'goto', goto: '23' })
-  expect(at('end')).toEqual({ kind: 'goto', goto: 'end' })
-  expect(parseArgs('https://www.cross-tables.com/annotated/selfgcg/621/anno62161.gcg').source).toBe(
-    'https://www.cross-tables.com/annotated/selfgcg/621/anno62161.gcg',
-  )
+  const game = '~/games/game.gcg'
+  expect(sim({ position: game, turn: 12 }).at).toEqual({ kind: 'turn', turn: 12 })
+  expect(sim({ position: game, rack: 'deeilrv' }).at).toEqual({ kind: 'rack', rack: 'DEEILRV' })
+  expect(sim({ position: game, word: 'VODKA' }).at).toEqual({ kind: 'word', word: 'VODKA' })
+  expect(sim({ position: game, word: '(S)ilvered', relation: 'after' }).at).toEqual({ kind: 'after', word: 'SILVERED' })
+  expect(sim({ position: game, letters: 'DEEILRV' }).at).toEqual({ kind: 'letters', letters: 'DEEILRV' })
+  expect(sim({ position: game, event: 23 }).at).toEqual({ kind: 'goto', goto: '23' })
+  expect(sim({ position: game }).at).toBe(undefined)
   // A CGP is taken whole, opcodes and all.
-  expect(parseArgs(CGP).position).toEqual({ kind: 'cgp', cgp: CGP })
+  expect(sim({ position: CGP }).position).toEqual({ kind: 'cgp', cgp: CGP })
   // Which position means nothing beside a rack or a CGP.
-  expect(() => parseArgs('ADOPQRR 12')).toThrow()
-  expect(() => parseArgs('game.gcg turn 12 rack AB')).toThrow()
-  // A bare "turn" says nothing; the latest position stands.
-  expect(parseArgs('game.gcg turn').at).toBe(undefined)
-  expect(() => parseArgs('game.gcg turn 0')).toThrow()
-  expect(() => parseArgs('')).toThrow()
+  expect(() => sim({ position: 'ADOPQRR', turn: 12 })).toThrow()
+  expect(() => sim({ position: game, turn: 0 })).toThrow()
+  expect(() => sim({})).toThrow()
+})
+
+test('with no position, the intent means what the pane shows, in its lexicon', () => {
+  const shown = sim({ position: '~/games/game.gcg', lexicon: 'CSW21', turn: 4 })
+  const moved = requestFromIntent({ action: 'sim', turn: 9 }, shown)
+  expect([moved.source, moved.lexicon, moved.at]).toEqual(['~/games/game.gcg', 'CSW21', { kind: 'turn', turn: 9 }])
+  // A new position starts afresh.
+  expect(requestFromIntent({ action: 'sim', position: 'RUCKSEX' }, shown).lexicon).toBe(undefined)
+})
+
+test("the interpreter's reply, and what it is told", () => {
+  expect(parseIntent('{"action":"sim","position":"RUCKSEX","lexicon":"nwl23"}')).toEqual({
+    action: 'sim',
+    position: 'RUCKSEX',
+    lexicon: 'NWL23',
+  })
+  // Fenced, or with words around it, the object is still read.
+  expect(parseIntent('```json\n{"action":"navigate","to":"previous"}\n```')).toEqual({ action: 'navigate', to: 'previous' })
+  expect(parseIntent('{"action":"lexicon","lexicon":"csw24"}')).toEqual({ action: 'lexicon', lexicon: 'CSW24' })
+  expect(parseIntent('{"action":"unclear","question":"Which game?"}')).toEqual({ action: 'unclear', question: 'Which game?' })
+  expect(() => parseIntent('no idea')).toThrow()
+  expect(() => parseIntent('{"action":"dance"}')).toThrow()
+  expect(() => parseIntent('{"action":"navigate","to":"sideways"}')).toThrow()
+
+  const { system, prompt } = interpreterPrompt('rucksex nwl', {
+    current: { label: 'anno62161.gcg turn 13', source: 'https://x.test/a.gcg', lexicon: 'CSW24', turn: 13, turns: 23 },
+    lexica: ['CSW24', 'NWL20', 'NWL23'],
+  })
+  expect(system).toContain('"rucksex nwl" -> {"action":"sim","position":"RUCKSEX","lexicon":"NWL23"}')
+  expect(prompt).toContain('The pane shows anno62161.gcg turn 13 (from https://x.test/a.gcg) in CSW24 at turn 13 of 23.')
+  expect(prompt).toContain('The lexicons installed: CSW24, NWL20, NWL23.')
+  expect(prompt.endsWith('What they typed: rucksex nwl')).toBe(true)
+  expect(interpreterPrompt('x', { lexica: [] }).prompt.startsWith('The pane shows nothing yet.')).toBe(true)
+
+  expect(checkLexicon('nwl23', ['CSW24', 'NWL23'])).toBe('NWL23')
+  expect(() => checkLexicon('NWL99', ['CSW24', 'NWL23'])).toThrow()
+  expect(checkLexicon('CSW19', [])).toBe('CSW19')
 })
 
 test('a CGP splits into its fields and its lexicon', () => {
@@ -252,9 +285,10 @@ test('positions are named short', () => {
   expect(positionLabel(CGP)).toBe('CGP')
 })
 
-// Stands in for the host: HOME, the core count, and MAGPIE, whose scan of a
-// GCG and whose sim answer from fixtures.
-function fakeHost(on: On, scan = SCAN_ENDING) {
+// Stands in for the host: HOME, the core count, the lexicons, MAGPIE (whose
+// scan of a GCG and whose sim answer from fixtures), and the model reading
+// /magpie's words, which answers `replies` in order.
+function fakeHost(on: On, scan = SCAN_ENDING, replies: string[] = []) {
   const runs: { argv: readonly string[]; stdin?: string; cwd?: string }[] = []
   on('process.run', (_$, e) => {
     runs.push({ argv: e.argv, stdin: e.init?.stdin, cwd: e.init?.cwd })
@@ -272,7 +306,13 @@ function fakeHost(on: On, scan = SCAN_ENDING) {
     } as never
   })
   on('fs.exists', () => ({ value: true }) as never)
+  on('fs.list', () => ({ value: ['CSW24.kwg', 'CSW24.klv2', 'NWL23.kwg'].map(name => ({ name, kind: 'file', size: 1 })) }) as never)
   on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('model.complete', () => {
+    const text = replies.shift()
+    const usage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
+    return { value: text === undefined ? { isAnswered: false, reason: 'api-error', usage } : { isAnswered: true, text, usage } } as never
+  })
   return runs
 }
 
@@ -305,18 +345,48 @@ test('a GCG with no turn named sims its latest position with a player to move', 
 
 test('a rack the player held more than once is asked about, not simmed', async ($, on) => {
   const runs = fakeHost(on, SCAN_PHONY)
-  const result = await $.tool.call({ tool: 'mcp__magpie-sim__simulate', position: XT_GAME, at: 'ADGKOSV' } as never)
+  const result = await $.tool.call({ tool: 'mcp__magpie-sim__simulate', position: XT_GAME, letters: 'ADGKOSV' } as never)
   const text = JSON.stringify(result)
-  expect(text).toContain('Not run: ADGKOSV fits 3 positions in anno62161.gcg')
+  expect(text).toContain('ADGKOSV fits 3 positions in anno62161.gcg')
   expect(text).toContain('turn 3: RightBehindYou to move with ADGKOSV, who played 6B VOKDA')
   expect(runs.some(run => run.stdin?.includes('gsimulate'))).toBe(false)
 })
 
-test('/magpie asks which position when its rack fits several', async ($, on) => {
-  fakeHost(on, SCAN_PHONY)
-  const { text } = await $.command.run({ command: 'magpie', args: `${XT_GAME} rack ADGKOSV` } as never)
+test('/magpie reads its words with the model, and asks which position when several fit', async ($, on) => {
+  fakeHost(on, SCAN_PHONY, [`{"action":"sim","position":"${XT_GAME}","rack":"ADGKOSV"}`])
+  const { text } = await $.command.run({ command: 'magpie', args: `${XT_GAME} when they had ADGKOSV` } as never)
   expect(text).toContain('Rack ADGKOSV fits 3 positions in anno62161.gcg:')
-  expect(text).toContain(`Say which: /magpie ${XT_GAME} turn 1`)
+  expect(text).toContain(`Say which, e.g. /magpie ${XT_GAME} turn 1`)
+})
+
+test('/magpie says so when the model does not answer', async ($, on) => {
+  fakeHost(on)
+  const { text } = await $.command.run({ command: 'magpie', args: 'rucksex' } as never)
+  expect(text).toContain('the model reading it did not answer (api-error)')
+})
+
+test('/magpie moves through the game the pane shows', async ($, on) => {
+  fakeHost(on, SCAN_PHONY, [
+    '{"action":"navigate","to":"next"}',
+    '{"action":"navigate","to":"previous"}',
+    '{"action":"navigate","to":"first"}',
+  ])
+  const before = await $.command.run({ command: 'magpie', args: 'next turn' } as never)
+  expect(before.text).toContain('no game to move through')
+  // The latest position, turn 6 of 6.
+  await $.tool.call({ tool: 'mcp__magpie-sim__simulate', position: XT_GAME } as never)
+  const back = await $.command.run({ command: 'magpie', args: 'back' } as never)
+  expect(back.text).toContain('Simulating anno62161.gcg turn 5')
+})
+
+test('/magpie with a lexicon alone analyzes the same position again, unless it is in use', async ($, on) => {
+  fakeHost(on, SCAN_ENDING, ['{"action":"lexicon","lexicon":"CSW24"}', '{"action":"lexicon","lexicon":"NWL23"}'])
+  await $.tool.call({ tool: 'mcp__magpie-sim__simulate', position: 'AEINRST' } as never)
+  const same = await $.command.run({ command: 'magpie', args: 'csw' } as never)
+  expect(same.text).toBe('Already using CSW24 for AEINRST.')
+  const other = await $.command.run({ command: 'magpie', args: 'nwl' } as never)
+  // The sim runs on after the command answers.
+  expect(other.text).toContain('Analyzing AEINRST again in NWL23 (was CSW24)')
 })
 
 // The endgame of that game, as MAGPIE printed it: the board after event 23,
@@ -366,7 +436,7 @@ test('tiles a play goes through are left where they are', () => {
 })
 
 test('a rack after the moves played before it', () => {
-  const request = parseArgs('AEINRST after 8g vav')
+  const request = sim({ position: 'AEINRST', after: [{ coordinate: '8g', word: 'vav' }] })
   expect(request.position).toEqual({ kind: 'rack', rack: 'AEINRST', after: [{ coordinate: '8G', word: 'VAV' }] })
   expect(request.label).toBe('AEINRST after 8G VAV')
   expect(magpieRun(request.position as never, {}, 10, { rit: true, wit: true }).stdin).toBe(
@@ -374,22 +444,26 @@ test('a rack after the moves played before it', () => {
   )
   // Mixed case keeps its blanks; a board tile in parentheses is a `.` to
   // commit and no tile from the rack.
-  const two = parseArgs('AEINRST after 8g VaV, then 9f (v)ie')
+  const two = sim({
+    position: 'AEINRST',
+    after: [
+      { coordinate: '8g', word: 'VaV' },
+      { coordinate: '9f', word: '(v)ie' },
+    ],
+  })
   expect(magpieRun(two.position as never, {}, 10, { rit: true, wit: true }).stdin).toBe(
     'rack V?V\ncommit 8G VaV\nrack IE\ncommit 9F .IE\nrack AEINRST\nshgame\ngsimulate\n',
   )
   expect(canonicalWord('vav')).toBe('VAV')
   expect(canonicalWord('VaV')).toBe('VaV')
   expect(tilesFromRack('ANTIQuES')).toBe('ANTIQ?ES')
-  expect(() => parseArgs('AEINRST after 8g')).toThrow()
-  expect(() => parseArgs(`${CGP} after 8g vav`)).toThrow()
+  expect(() => sim({ position: 'AEINRST', after: [{ coordinate: 'Z9', word: 'VAV' }] })).toThrow()
+  expect(() => sim({ position: CGP, after: [{ coordinate: '8G', word: 'VAV' }] })).toThrow()
 })
 
 test('before a word is the rack it was played from; after it, its player’s next rack', () => {
   const positions = gcgPositions(SCAN_PHONY)
   const events = (choice: Choice) => ('position' in choice ? choice.position.events : choice)
-  expect(parseArgs('game.gcg after lea').at).toEqual({ kind: 'after', word: 'LEA' })
-  expect(parseArgs('game.gcg after 6b vokda').at).toEqual({ kind: 'after', word: 'VOKDA', coordinate: '6B' })
   expect(events(choosePosition(positions, { kind: 'word', word: 'LEA' }))).toBe(8)
   // HastyBot played LEA on turn 2; their next rack is turn 4's.
   expect(events(choosePosition(positions, { kind: 'after', word: 'LEA' }))).toBe(11)
@@ -401,20 +475,8 @@ test('before a word is the rack it was played from; after it, its player’s nex
   const lastTurn = choosePosition(positions, { kind: 'after', word: 'VODKA' })
   expect('error' in lastTurn ? lastTurn.error : lastTurn).toBe("VODKA was RightBehindYou's last turn; no rack came after it")
   expect('error' in choosePosition(gcgPositions(SCAN_ENDING), { kind: 'after', word: 'SILVERED' })).toBe(true)
-})
-
-test('words around the position are skipped', () => {
-  const at = (args: string) => parseArgs(`game.gcg ${args}`).at
-  expect(at('the VODKA turn')).toEqual({ kind: 'letters', letters: 'VODKA' })
-  expect(at("VODKA's turn")).toEqual({ kind: 'letters', letters: 'VODKA' })
-  expect(at('the turn where VODKA was played')).toEqual({ kind: 'letters', letters: 'VODKA' })
-  expect(at('when I played VODKA')).toEqual({ kind: 'letters', letters: 'VODKA' })
-  expect(at('before the VODKA turn')).toEqual({ kind: 'word', word: 'VODKA' })
-  expect(at('after the VODKA turn')).toEqual({ kind: 'after', word: 'VODKA' })
-  expect(at('move 3')).toEqual({ kind: 'turn', turn: 3 })
-  expect(at('the turn #3')).toEqual({ kind: 'turn', turn: 3 })
-  // "The VODKA turn" is where VODKA was played.
-  const positions = gcgPositions(SCAN_PHONY)
+  // "The VODKA turn", as letters that could be a rack, is where VODKA was
+  // played.
   const choice = choosePosition(positions, { kind: 'letters', letters: 'VODKA' })
   expect('position' in choice ? choice.position.turn : choice).toBe(5)
 })
@@ -461,13 +523,13 @@ test('a play and its challenge bonus are one turn', () => {
 test('cross-tables links, and the move their viewer shows', () => {
   const link = 'https://www.cross-tables.com/annotated.php?u=62161#13#'
   expect(classifyPosition(link)).toEqual({ kind: 'gcg', source: 'https://www.cross-tables.com/annotated.php?u=62161' })
-  expect(parseArgs(link).label).toBe('cross-tables 62161')
+  expect(sim({ position: link }).label).toBe('cross-tables 62161')
   // #13# is the viewer's move 13: the turn it was played on.
-  expect(parseArgs(link).at).toEqual({ kind: 'move', event: 13 })
-  expect(parseArgs('https://www.cross-tables.com/annotated.php?u=62161').at).toBe(undefined)
-  expect(parseArgs('https://www.cross-tables.com/annotated.php?u=62161#0#').at).toBe(undefined)
-  // Words after the link say which position instead.
-  expect(parseArgs(`${link} turn 5`).at).toEqual({ kind: 'turn', turn: 5 })
+  expect(sim({ position: link }).at).toEqual({ kind: 'move', event: 13 })
+  expect(sim({ position: 'https://www.cross-tables.com/annotated.php?u=62161' }).at).toBe(undefined)
+  expect(sim({ position: 'https://www.cross-tables.com/annotated.php?u=62161#0#' }).at).toBe(undefined)
+  // A turn asked for says which position instead.
+  expect(sim({ position: link, turn: 5 }).at).toEqual({ kind: 'turn', turn: 5 })
   const positions = gcgPositions(SCAN_PHONY)
   const events = (choice: Choice) => ('position' in choice ? choice.position.events : choice)
   // Move 10 is the phony, played on RightBehindYou's turn 3; move 11, its
