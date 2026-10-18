@@ -45,6 +45,10 @@ export type Selector =
   | { kind: 'letters'; letters: string }
   /** MAGPIE's own `goto` argument: events played, start or end. */
   | { kind: 'goto'; goto: string }
+  /** The turn the game's event-th event was a move of: cross-tables's
+   * viewer counts moves so (`#13#`), challenge bonuses and end points
+   * among them. */
+  | { kind: 'move'; event: number }
 
 export type SimRequest = {
   position: Position
@@ -144,11 +148,11 @@ export function positionLabel(text: string): string {
   return /[/]/.test(trimmed) ? (trimmed.split('/').filter(part => part !== '').pop() ?? trimmed) : trimmed
 }
 
-/** The events played that a game viewer's link shows: cross-tables's
- * annotated viewer writes its move counter, which counts what MAGPIE's
- * `goto` does, as `#13#`. */
-export function gameFragmentEvents(text: string): string | undefined {
-  return /^https?:\/\/[^#]*cross-tables\.com\/[^#]*#(\d+)#?$/i.exec(text.trim())?.[1]
+/** The move a game viewer's link shows: cross-tables's annotated viewer
+ * writes its move counter, which counts the events MAGPIE does, as `#13#`. */
+export function gameFragmentMove(text: string): number | undefined {
+  const move = /^https?:\/\/[^#]*cross-tables\.com\/[^#]*#(\d+)#?$/i.exec(text.trim())?.[1]
+  return move === undefined ? undefined : Number(move)
 }
 
 function selector(kind: Selector['kind'] | undefined, value: string): Selector {
@@ -313,9 +317,9 @@ export function parseArgs(args: string): SimRequest {
   } else if (at !== undefined) {
     request.at = at
   } else {
-    const events = gameFragmentEvents(first)
-    if (events !== undefined) {
-      request.at = { kind: 'goto', goto: events }
+    const move = gameFragmentMove(first)
+    if (move !== undefined && move > 0) {
+      request.at = { kind: 'move', event: move }
     }
   }
   return request
@@ -388,6 +392,9 @@ export type GcgPosition = {
   /** That move as MAGPIE writes it (`11H (S)ILVERED 74 DEEILRV`); none at
    * the latest position of a game in progress. */
   move?: string
+  /** The events played once that move was: one more than `events`, or more
+   * where MAGPIE takes a play and its challenge bonus as one step. */
+  movedTo?: number
 }
 
 // Each printed game opens with the column letters.
@@ -415,18 +422,22 @@ export function gcgPositions(output: string): GcgPosition[] {
       event: event === null ? undefined : { player: event[2] ?? '', what: event[3] ?? '' },
     })
   }
-  const latest = Math.max(-1, ...printed.keys())
+  // `next` and `goto` step over an event MAGPIE takes with the one before
+  // (a challenge bonus with its play), so the next event printed is the
+  // next step, whatever its number.
+  const printedEvents = [...printed.keys()].sort((a, b) => a - b)
   const positions: GcgPosition[] = []
-  for (let events = 0; events <= latest; events++) {
+  for (const [index, events] of printedEvents.entries()) {
     const onTurn = printed.get(events)?.onTurn
     if (onTurn === undefined) {
       continue
     }
-    const next = printed.get(events + 1)?.event
-    if (next === undefined && events === latest) {
+    const movedTo = printedEvents[index + 1]
+    const next = movedTo === undefined ? undefined : printed.get(movedTo)?.event
+    if (movedTo === undefined) {
       positions.push({ events, turn: positions.length + 1, ...onTurn })
     } else if (next !== undefined && next.player === onTurn.player) {
-      positions.push({ events, turn: positions.length + 1, ...onTurn, move: next.what })
+      positions.push({ events, turn: positions.length + 1, ...onTurn, move: next.what, movedTo })
     }
   }
   return positions
@@ -470,6 +481,13 @@ export function choosePosition(positions: readonly GcgPosition[], at: Selector |
   }
   if (at === undefined) {
     return { position: positions[positions.length - 1] as GcgPosition }
+  }
+  if (at.kind === 'move') {
+    // The turn whose move took the game past that event.
+    const position = positions.find(
+      candidate => candidate.movedTo !== undefined && candidate.events < at.event && at.event <= candidate.movedTo,
+    )
+    return position === undefined ? { error: `the game's move ${at.event} was no one's turn` } : { position }
   }
   if (at.kind === 'turn') {
     const position = positions.find(candidate => candidate.turn === at.turn)

@@ -46,10 +46,10 @@ const BOARD_COLUMNS = 44
 const BOARD_ROWS = 24
 // Rows the table draws above its plays: the summary, the keys, the headings.
 const TABLE_CHROME_ROWS = 3
-// The full table's width; below it the table drops its less-used columns.
-const FULL_TABLE_COLUMNS = 75
-// Wide enough for the board beside the full table.
-const PANE_COLUMNS = BOARD_COLUMNS + 2 + FULL_TABLE_COLUMNS
+// About the full table's width (tableLayout measures it per sim), for the
+// pane's opening size: room for the board beside it.
+const TYPICAL_TABLE_COLUMNS = 80
+const PANE_COLUMNS = BOARD_COLUMNS + 2 + TYPICAL_TABLE_COLUMNS
 const PANE_ROWS = 30
 
 const selectedId = atom({ plugin: 'magpie-sim', key: 'selectedId' } as const, '')
@@ -363,7 +363,6 @@ async function runPlan($: EngineInterface, plan: Plan): Promise<Sim> {
 
 type Column = {
   title: string
-  width: number
   sort?: SortKey
   isLeft?: true
   isCompact?: true
@@ -373,18 +372,35 @@ type Column = {
 const signed = (value: number) => (value > 0 ? '+' : '') + value.toFixed(2)
 
 const COLUMNS: readonly Column[] = [
-  { title: 'Play', width: 12, sort: 'play', isLeft: true, isCompact: true, cell: play => play.id },
-  { title: 'Leave', width: 7, isLeft: true, cell: play => play.leave },
-  { title: 'Sc', width: 3, sort: 'score', isCompact: true, cell: play => String(play.score) },
-  { title: 'Win%', width: 6, sort: 'win', isCompact: true, cell: play => play.winPct.toFixed(2) },
-  { title: '±', width: 4, cell: play => play.winSe.toFixed(2) },
-  { title: 'Eq', width: 6, sort: 'equity', isCompact: true, cell: play => signed(play.equity) },
-  { title: 'StEq', width: 6, sort: 'static', cell: play => signed(play.staticEquity) },
-  { title: 'Iters', width: 6, sort: 'iterations', cell: play => String(play.iterations) },
+  { title: 'Play', sort: 'play', isLeft: true, isCompact: true, cell: play => play.id },
+  { title: 'Leave', isLeft: true, cell: play => play.leave },
+  { title: 'Sc', sort: 'score', isCompact: true, cell: play => String(play.score) },
+  { title: 'Win%', sort: 'win', isCompact: true, cell: play => play.winPct.toFixed(2) },
+  { title: '±', cell: play => play.winSe.toFixed(2) },
+  { title: 'Eq', sort: 'equity', isCompact: true, cell: play => signed(play.equity) },
+  { title: 'StEq', sort: 'static', cell: play => signed(play.staticEquity) },
+  { title: 'Iters', sort: 'iterations', cell: play => String(play.iterations) },
   // The opponent's reply: its mean score and how often it bingoes.
-  { title: 'OpSc', width: 5, cell: play => play.plies[0]?.score.toFixed(1) ?? '' },
-  { title: 'OpBn%', width: 5, cell: play => play.plies[0]?.bingoPct.toFixed(1) ?? '' },
+  { title: 'OpSc', cell: play => play.plies[0]?.score.toFixed(1) ?? '' },
+  { title: 'OpBn%', cell: play => play.plies[0]?.bingoPct.toFixed(1) ?? '' },
 ]
+// The selection marker and the sim's rank, before the columns.
+const RANK_WIDTH = 5
+
+/** The table's columns, each as wide as its widest cell, or its title with
+ * room for a sort arrow, and the width of a whole row. */
+export type TableLayout = { columns: readonly { column: Column; width: number }[]; width: number }
+
+export function tableLayout(plays: readonly Play[], isCompact: boolean): TableLayout {
+  const columns = (isCompact ? COLUMNS.filter(column => column.isCompact) : COLUMNS).map(column => ({
+    column,
+    width: Math.max(
+      column.title.length + (column.sort === undefined ? 0 : 1),
+      ...plays.map(play => column.cell(play).length),
+    ),
+  }))
+  return { columns, width: columns.reduce((total, { width }) => total + 1 + width, RANK_WIDTH) }
+}
 
 const SORT_KEYS: readonly { key: SortKey; hotkey: string; label: string }[] = [
   { key: 'win', hotkey: 'w', label: 'win%' },
@@ -426,25 +442,21 @@ export function windowStart(top: number, index: number, room: number, count: num
   return Math.min(Math.max(0, start), Math.max(0, count - room))
 }
 
-function pad(text: string, column: Column): string {
-  return column.isLeft ? text.padEnd(column.width) : text.padStart(column.width)
+function pad(text: string, column: Column, width: number): string {
+  return column.isLeft ? text.padEnd(width) : text.padStart(width)
 }
 
-function columnsFor(isCompact: boolean): readonly Column[] {
-  return isCompact ? COLUMNS.filter(column => column.isCompact) : COLUMNS
-}
-
-export function headerLine(key: SortKey, descending: boolean, isCompact: boolean): string {
-  const titles = columnsFor(isCompact).map(column =>
-    pad(column.title + (column.sort === key ? (descending ? '▼' : '▲') : ''), column),
+export function headerLine(layout: TableLayout, key: SortKey, descending: boolean): string {
+  const titles = layout.columns.map(({ column, width }) =>
+    pad(column.title + (column.sort === key ? (descending ? '▼' : '▲') : ''), column, width),
   )
-  return ['#'.padStart(5), ...titles].join(' ')
+  return ['#'.padStart(RANK_WIDTH), ...titles].join(' ')
 }
 
 // The rank is the sim's own, by win%, whatever the table's order.
-export function rowLine(play: Play, isSelected: boolean, isCompact: boolean): string {
-  const cells = columnsFor(isCompact).map(column => pad(column.cell(play), column))
-  return [(isSelected ? '▶' : ' ') + String(play.rank).padStart(4), ...cells].join(' ')
+export function rowLine(layout: TableLayout, play: Play, isSelected: boolean): string {
+  const cells = layout.columns.map(({ column, width }) => pad(column.cell(play), column, width))
+  return [(isSelected ? '▶' : ' ') + String(play.rank).padStart(RANK_WIDTH - 1), ...cells].join(' ')
 }
 
 export function summaryLine(sim: Sim): string {
@@ -779,8 +791,11 @@ export const register: Register = (on, options) => {
         return <Text dimColor>No plays.</Text>
       }
 
-      const isCompact = e.props.bodyColumns < FULL_TABLE_COLUMNS
-      const isWide = e.props.bodyColumns >= PANE_COLUMNS
+      // The full table where it fits, else its main columns; the board
+      // beside it where both fit, else above.
+      const fullLayout = tableLayout(sim.plays, false)
+      const layout = e.props.bodyColumns < fullLayout.width ? tableLayout(sim.plays, true) : fullLayout
+      const isWide = e.props.bodyColumns >= BOARD_COLUMNS + 2 + layout.width
       const besideBoard = isWide ? 0 : BOARD_ROWS + 1
       const statusRows = status === null ? 0 : 1
       const room = Math.max(3, e.props.scroll.bodyRows - TABLE_CHROME_ROWS - besideBoard - statusRows)
@@ -839,11 +854,11 @@ export const register: Register = (on, options) => {
             ))}
           </Box>
           <Text bold wrap="truncate-end">
-            {headerLine(key, descending, isCompact)}
+            {headerLine(layout, key, descending)}
           </Text>
           {shown.map(play => (
             <Text inverse={play.id === selected.id} wrap="truncate-end">
-              {rowLine(play, play.id === selected.id, isCompact)}
+              {rowLine(layout, play, play.id === selected.id)}
             </Text>
           ))}
         </Box>

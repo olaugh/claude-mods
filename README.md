@@ -54,7 +54,8 @@ For a GCG, which position:
 - a rack the player to move held: `DEEILRV`, `rack DEEILRV`
 - a word: `VODKA`, `the VODKA turn` or `before VODKA` is the rack VODKA was played from; `after VODKA` is that player's
   next rack
-- `event 23`: MAGPIE's `goto`, events played; a cross-tables viewer link's `#13#` means the same
+- `event 23`: MAGPIE's `goto`, events played
+- a cross-tables viewer link's `#13#`: the turn its move 13 was played on
 
 Words around these (`the`, `turn`, `where`, `played`) are skipped. Left out, the latest position with a player to move.
 When it fits more than one position, `/magpie` lists them and asks which. Asking Claude ("sim AEINRST after 8G VAV")

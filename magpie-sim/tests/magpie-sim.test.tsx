@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 
 import { glyphInk } from '../hooks/board'
 import { boardPicture } from '../hooks/draw'
-import { headerLine, rowLine, sortPlays, summaryLine, windowStart } from '../hooks/register'
+import { headerLine, rowLine, sortPlays, summaryLine, tableLayout, windowStart } from '../hooks/register'
 import { parsePlayLine, parseSim, placedTiles, rackGhosts, type Play } from '../hooks/sim'
 import { boardSvg } from '../hooks/svg'
 import { PICTURE_HEIGHT, PICTURE_WIDTH, PREVIEW_BG, squareX, squareY } from '../hooks/theme'
@@ -96,11 +96,12 @@ test('the rack ghosts what the play spends or throws back', () => {
 
 test('headings line up with the rows', () => {
   for (const isCompact of [false, true]) {
+    const layout = tableLayout(SIM.plays, isCompact)
     for (const play of SIM.plays) {
-      expect(headerLine('win', true, isCompact).length).toBe(rowLine(play, true, isCompact).length)
+      expect(headerLine(layout, 'win', true).length).toBe(rowLine(layout, play, true).length)
     }
+    expect(layout.width).toBe(headerLine(layout, 'win', true).length)
   }
-  expect(headerLine('win', true, false).length).toBe(75)
 })
 
 test('the font reader finds glyphs, and bold widens them', () => {

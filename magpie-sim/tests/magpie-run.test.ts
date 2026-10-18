@@ -15,7 +15,7 @@ import {
   tilesFromRack,
   type Choice,
 } from '../hooks/magpie'
-import { reportLines } from '../hooks/register'
+import { headerLine, reportLines, rowLine, tableLayout } from '../hooks/register'
 import { parseSim, placedTiles, rackGhosts } from '../hooks/sim'
 
 const CGP = '15/15/15/15/15/15/15/5DROP6/15/15/15/15/15/15/15 AEINRST/AQR 14/0 0 lex CSW24;'
@@ -419,18 +419,74 @@ test('words around the position are skipped', () => {
   expect('position' in choice ? choice.position.turn : choice).toBe(5)
 })
 
+// Events 17 to 21 of anno62161.gcg: MAGPIE takes Josh's GAMBOGIC (event 19)
+// and its challenge bonus (event 20) as one step, so `next` prints no event
+// 19.
+const SCAN_BONUS = `
+   A B C D E F G H I J K L M N O     Josh           453
+   ------------------------------  > Nits  DEGIINT  265
+13|  W A Z     ' L '       -     |   Event 17 (Josh):
+14|  -       "   E   "       -   |   3G REGNANT 79 AEGNNRT
+   A B C D E F G H I J K L M N O   > Josh  ABCGIMO  453
+   ------------------------------    Nits           277
+13|  W A Z     ' L '       -     |   Event 18 (Nits):
+14|  -       "   E   "       -   |   H1 GI(E) 12 DEGIINT
+   A B C D E F G H I J K L M N O     Josh           559
+   ------------------------------  > Nits  CDEINPT  277
+13|  W A Z     ' L '       -     |   Event 20 (Josh):
+14|  -       "   E   "       -   |   1H (G)AMBOGIC 101 + 5 = 106 ABCGIMO
+   A B C D E F G H I J K L M N O   > Josh  DEEFORX  559
+   ------------------------------    Nits           361
+13|  W A Z     ' L '       -     |   Event 21 (Nits):
+14|  -       "   E   "       -   |   14G P(E)NTICED 84 CDEINPT
+`
+
+test('a play and its challenge bonus are one turn', () => {
+  const positions = gcgPositions(SCAN_BONUS)
+  expect(positions.map(position => [position.events, position.turn, position.player, position.movedTo])).toEqual([
+    [17, 1, 'Nits', 18],
+    [18, 2, 'Josh', 20],
+    [20, 3, 'Nits', 21],
+    [21, 4, 'Josh', undefined],
+  ])
+  const events = (choice: Choice) => ('position' in choice ? choice.position.events : choice)
+  // The viewer's move 19 is GAMBOGIC, and its move 20 the bonus: both
+  // Josh's turn.
+  expect(events(choosePosition(positions, { kind: 'move', event: 19 }))).toBe(18)
+  expect(events(choosePosition(positions, { kind: 'move', event: 20 }))).toBe(18)
+  expect(events(choosePosition(positions, { kind: 'move', event: 21 }))).toBe(20)
+  expect('error' in choosePosition(positions, { kind: 'move', event: 25 })).toBe(true)
+})
+
 test('cross-tables links, and the move their viewer shows', () => {
   const link = 'https://www.cross-tables.com/annotated.php?u=62161#13#'
   expect(classifyPosition(link)).toEqual({ kind: 'gcg', source: 'https://www.cross-tables.com/annotated.php?u=62161' })
   expect(parseArgs(link).label).toBe('cross-tables 62161')
-  expect(parseArgs(link).at).toEqual({ kind: 'goto', goto: '13' })
+  // #13# is the viewer's move 13: the turn it was played on.
+  expect(parseArgs(link).at).toEqual({ kind: 'move', event: 13 })
   expect(parseArgs('https://www.cross-tables.com/annotated.php?u=62161').at).toBe(undefined)
+  expect(parseArgs('https://www.cross-tables.com/annotated.php?u=62161#0#').at).toBe(undefined)
   // Words after the link say which position instead.
   expect(parseArgs(`${link} turn 5`).at).toEqual({ kind: 'turn', turn: 5 })
-  // A viewer's position is named by its turn when a player moves from it.
   const positions = gcgPositions(SCAN_PHONY)
+  const events = (choice: Choice) => ('position' in choice ? choice.position.events : choice)
+  // Move 10 is the phony, played on RightBehindYou's turn 3; move 11, its
+  // withdrawal, was no one's turn.
+  expect(events(choosePosition(positions, { kind: 'move', event: 10 }))).toBe(9)
+  expect('error' in choosePosition(positions, { kind: 'move', event: 11 })).toBe(true)
+  // `event N` is MAGPIE's goto, named by its turn where one starts there.
   const choice = choosePosition(positions, { kind: 'goto', goto: '11' })
   expect('position' in choice ? choice.position.turn : choice).toBe(4)
-  // After event 10 the phony is still on the board: no turn starts there.
   expect(choosePosition(positions, { kind: 'goto', goto: '10' })).toEqual({ goto: '10' })
+})
+
+test('columns fit the longest play, through-tiles and all', () => {
+  const sim = parseSim(ENDGAME_OUTPUT)
+  const layout = tableLayout(sim.plays, false)
+  const header = headerLine(layout, 'win', true)
+  const rows = sim.plays.map(play => rowLine(layout, play, false))
+  expect(rows.every(row => row.length === header.length)).toBe(true)
+  // Every row's Win% ends where the heading's does.
+  const winEnd = header.indexOf('Win%▼') + 'Win%▼'.length
+  expect(rows.every(row => /\d$/.test(row.slice(0, winEnd)) && row[winEnd] === ' ')).toBe(true)
 })
