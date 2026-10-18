@@ -10,7 +10,7 @@ export const DEFAULT_LEXICON = 'CSW24'
 // 5,000 iterations for each of the top 50 plays, shared evenly.
 export const SIM_PLAYS = 50
 export const ITERATIONS_PER_PLAY = 5000
-export const SIM_PLIES = 2
+export const SIM_PLIES = 4
 // Long enough never to cut the iterations short.
 const SIM_TIME_LIMIT_SECONDS = 3600
 // More `next`s than any game has events; the ones past its end only say so.
