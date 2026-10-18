@@ -401,7 +401,7 @@ test('/magpie moves through the game the pane shows', async ($, on) => {
   // The latest position, turn 6 of 6.
   await $.tool.call({ tool: 'mcp__magpie-sim__simulate', position: XT_GAME } as never)
   const back = await $.command.run({ command: 'magpie', args: 'back' } as never)
-  expect(back.text).toContain('Simulating anno62161.gcg turn 5')
+  expect(back.text).toContain('Simulating anno62161.gcg turn 5 in ')
 })
 
 test('/magpie with a lexicon alone analyzes the same position again, unless it is in use', async ($, on) => {
@@ -854,7 +854,7 @@ test('/magpie plays on: each move found on the board, then the new rack simmed',
   await $.tool.call({ tool: 'mcp__magpie-sim__simulate', position: shownRack, after: [{ coordinate: '8G', word: 'QI' }] } as never)
   const { text } = await $.command.run({ command: 'magpie', args: 'inertias was played. opp played zag through the a in inertias. next rack for me is polish?' } as never)
   expect(text).toContain('Played H8 (I)NERTIAS for 77 (the top of its placements), then 14G Z(A)G for 13.')
-  expect(text).toContain('Simulating ?HILOPS')
+  expect(text).toContain('Simulating ?HILOPS in CSW24')
   const zagSearch = runs.find(run => run.stdin?.includes('rack ZG\ngenerate'))
   expect(zagSearch?.stdin).toBe('rack QI\ncommit 8G QI\nrack NERTIAS\ncommit H8 .NERTIAS\nshgame\nrack ZG\ngenerate\n')
   expect(zagSearch?.argv.join(' ')).toContain('-wmp false')
@@ -997,7 +997,7 @@ test('/magpie asks which Z of JAZZ was the blank, and the answer goes on from th
     'Played 8G JAZz for 38, then a pass. You kept ION after JAZz, but ABCDEF? does not hold it. What is your rack?',
   )
   expect(prompts[2]).toContain('What they typed: "I played jazz 8g keeping ion", then "the second z"')
-  expect(await magpie('eimnot?')).toContain('Simulating EIMNOT?')
+  expect(await magpie('eimnot?')).toContain('Simulating EIMNOT? in CSW24')
   expect(prompts[3]).not.toContain('It asked')
   // JAZz committed from the whole rack it was played from.
   expect(runs.some(run => run.stdin === 'rack JAZ?ION\ncommit 8G JAZz\ncommit pass\nshgame\nrack EIMNOT?\n')).toBe(true)

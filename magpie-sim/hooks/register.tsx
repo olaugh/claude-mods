@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { SortKey } from '../types'
 import { cardPicture } from './card'
-import { boardPicture, ROW_TILE_STEP, tilesPicture } from './draw'
+import { boardPicture, ROW_TILE_STEP, tilesPicture, type Picture } from './draw'
 import {
   cgpUnseen,
   applyMove,
@@ -19,6 +19,7 @@ import {
   parseGenerated,
   rackLess,
   racksFor,
+  runLexicon,
   sameTiles,
   shortText,
   tilesFromRack,
@@ -69,6 +70,12 @@ const INTERPRETER_MAX_TOKENS = 400
 const INTERPRETER_TIMEOUT_MS = 30_000
 // The pane's top plays the interpreter is told of.
 const TOP_PLAYS_TOLD = 8
+// The plays the pane lists, the sim's top ones.
+const PLAYS_LISTED = 15
+// The most bytes of pictures one tree may hold (Claude Code refuses more
+// than 2 MiB), less a margin; and a PNG's bytes beyond its pixels'.
+const IMAGE_BUDGET = 2_000_000
+const PNG_OVERHEAD = 4096
 // The /magpie lines a question keeps, the one that asked it last.
 const ASKED_KEPT = 3
 // Ten minutes, the most $.process.run allows.
@@ -312,7 +319,14 @@ type Plan = {
 
 /** What the pane says while a plan runs. */
 function planStatus(plan: Plan): string {
-  return plan.mode === 'endgame' ? `Solving the endgame of ${plan.label}` : `Simulating ${plan.label}: ${SIM_SHAPE}`
+  return plan.mode === 'endgame'
+    ? `Solving the endgame of ${plan.label} in ${lexiconText(plan)}`
+    : `Simulating ${plan.label} in ${lexiconText(plan)}: ${SIM_SHAPE}`
+}
+
+/** Which lexicon a plan runs in, as the person is told it. */
+function lexiconText(plan: Plan): string {
+  return runLexicon(plan.resolved, plan.lexicon) ?? "the game's lexicon"
 }
 
 /** What the pane shows, for `/magpie next turn` and `/magpie csw`: the
@@ -651,13 +665,19 @@ export function reportLines(sim: Sim, count: number): string[] {
     )
 }
 
-// The selected play's picture as RGBA bytes, the last few kept: each is about
-// 1.6 MB of base64.
+// A picture as a PNG's base64: three bytes a pixel, not RGBA's four, as a
+// tree holds at most IMAGE_BUDGET bytes of pictures.
+function pngSource(picture: Picture): string {
+  return encodePng(picture.width, picture.height, picture.pixels).toBase64()
+}
+
+// The selected play's picture as a PNG, the last few kept: each is about
+// 1.1 MB.
 function pictureSource(font: Font, sim: Sim, play: Play) {
-  let rgba = pictures.get(play.id)
-  if (rgba === undefined) {
+  let png = pictures.get(play.id)
+  if (png === undefined) {
     const started = Date.now()
-    rgba = boardPicture(font, sim.board, sim.rack, play).pixels.toBase64()
+    png = pngSource(boardPicture(font, sim.board, sim.rack, play))
     lastPictureMs = Date.now() - started
     if (pictures.size >= PICTURES_KEPT) {
       const oldest = pictures.keys().next().value
@@ -668,12 +688,17 @@ function pictureSource(font: Font, sim: Sim, play: Play) {
   } else {
     pictures.delete(play.id)
   }
-  pictures.set(play.id, rgba)
-  return { rgba, width: PICTURE_WIDTH, height: PICTURE_HEIGHT }
+  pictures.set(play.id, png)
+  return { png }
+}
+
+/** The plays the pane lists: the sim's top ones, as it ranks them. */
+function listedPlays(sim: Sim): Play[] {
+  return sim.plays.slice(0, PLAYS_LISTED)
 }
 
 async function sortedPlays($: EngineInterface, sim: Sim): Promise<Play[]> {
-  return sortPlays(sim.plays, await read($, sortKey), await read($, isDescending))
+  return sortPlays(listedPlays(sim), await read($, sortKey), await read($, isDescending))
 }
 
 // Where the selected play stands in the table: the first play when nothing
@@ -703,18 +728,21 @@ async function selectPlay($: EngineInterface, id: string) {
   await update($, selectedId, () => id)
 }
 
-// A row's tiles as RGBA bytes, by play, for the sim loaded now.
+// A row's tiles as a PNG, by play, for the sim loaded now.
 const rowPictures = new Map<string, string>()
 
 function rowTilesSource(font: Font, play: Play, slots: number) {
   const key = `${slots}:${play.id}`
-  let rgba = rowPictures.get(key)
-  if (rgba === undefined) {
-    rgba = tilesPicture(font, playTiles(play).tiles, slots).pixels.toBase64()
-    rowPictures.set(key, rgba)
+  let png = rowPictures.get(key)
+  if (png === undefined) {
+    png = pngSource(tilesPicture(font, playTiles(play).tiles, slots))
+    rowPictures.set(key, png)
   }
-  return { rgba, width: slots * ROW_TILE_STEP, height: SQUARE }
+  return { png }
 }
+
+// About how many bytes a PNG of `width` by `height` takes, stored as it is.
+const pngBytes = (width: number, height: number) => (1 + width * 3) * height + PNG_OVERHEAD
 
 async function sortBy($: EngineInterface, key: SortKey) {
   if ((await read($, sortKey)) === key) {
@@ -1359,7 +1387,7 @@ export const register: Register = (on, options) => {
       .then(sim => (fromPhone ? sendPicture($, sim) : undefined))
       .catch((error: unknown) => note(`${plan.label}: ${String(error)}`))
     return {
-      text: `${opened}. ${found.message ?? planStatus(plan)}. ${fromPhone ? 'A picture follows' : 'The pane fills in'} when it finishes.`,
+      text: `${opened}. ${found.message === undefined ? planStatus(plan) : `${found.message} in ${lexiconText(plan)}`}. ${fromPhone ? 'A picture follows' : 'The pane fills in'} when it finishes.`,
     }
   })
 
@@ -1491,7 +1519,8 @@ export const register: Register = (on, options) => {
       }
       const key = await read($, sortKey)
       const descending = await read($, isDescending)
-      const sorted = sortPlays(sim.plays, key, descending)
+      const listed = listedPlays(sim)
+      const sorted = sortPlays(listed, key, descending)
       const index = selectedIndex(sorted, await read($, selectedId))
       const selected = sorted[index]
       if (selected === undefined) {
@@ -1505,14 +1534,18 @@ export const register: Register = (on, options) => {
       } catch (fontError) {
         fontProblem = `Could not read ${FONT_FILE}: ${String(fontError)}`
       }
-      // The terminal spells each play in tiles, as pictures.
-      const isTiled = e.surface === 'terminal' && font !== null
+      // The terminal spells each play in tiles, as pictures, while they and
+      // the board's fit the tree's budget; else in letters.
+      const tiledSlots = Math.max(1, ...listed.map(play => playTiles(play).tiles.length))
+      const isTiled =
+        e.surface === 'terminal' &&
+        font !== null &&
+        pngBytes(PICTURE_WIDTH, PICTURE_HEIGHT) + listed.length * pngBytes(tiledSlots * ROW_TILE_STEP, SQUARE) <= IMAGE_BUDGET
 
       // The full table where it fits, else its main columns; the board
       // beside it where both fit, else above.
-      const fullLayout = tableLayout(sim.plays, false, isTiled, sim.kind)
-      const layout =
-        e.props.bodyColumns < fullLayout.width ? tableLayout(sim.plays, true, isTiled, sim.kind) : fullLayout
+      const fullLayout = tableLayout(listed, false, isTiled, sim.kind)
+      const layout = e.props.bodyColumns < fullLayout.width ? tableLayout(listed, true, isTiled, sim.kind) : fullLayout
       const isWide = e.props.bodyColumns >= BOARD_COLUMNS + 2 + layout.width
       const besideBoard = isWide ? 0 : BOARD_ROWS + 1
       const statusRows = status === null ? 0 : 1
@@ -1600,7 +1633,7 @@ export const register: Register = (on, options) => {
         <Box flexDirection="column">
           {status}
           <Text dimColor wrap="truncate-end">
-            {`${summaryLine(sim)} · ${top + 1}-${top + shown.length} of ${sorted.length}${timing}`}
+            {`${summaryLine(sim)} · ${shown.length < sorted.length ? `${top + 1}-${top + shown.length} of the ` : ''}top ${sorted.length} of ${sim.plays.length}${timing}`}
           </Text>
           {header}
           {rows}

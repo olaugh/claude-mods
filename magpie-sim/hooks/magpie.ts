@@ -732,18 +732,23 @@ export function commitCommands(moves: readonly PlacedMove[]): string[] {
   )
 }
 
+/** The lexicon a run of `position` uses: the one asked for, else a CGP's
+ * own, else CSW24; a game's own, unread here, is undefined. */
+export function runLexicon(position: Resolved, lexicon: string | undefined): string | undefined {
+  if (lexicon !== undefined || position.kind === 'gcg') {
+    return lexicon
+  }
+  return (position.kind === 'cgp' ? splitCgp(position.cgp).lexicon : undefined) ?? DEFAULT_LEXICON
+}
+
 // The commands that reach a position, before what it is for: the board and
 // the moves after it, not the rack to move with.
 function setupCommands(position: Resolved, request: { lexicon?: string; goto?: string }) {
   const commands: string[] = []
-  let lexicon = request.lexicon
-  if (position.kind === 'rack') {
-    lexicon ??= DEFAULT_LEXICON
-  } else if (position.kind === 'cgp') {
-    const { fields, lexicon: cgpLexicon } = splitCgp(position.cgp)
-    lexicon ??= cgpLexicon ?? DEFAULT_LEXICON
-    commands.push(`cgp ${fields}`)
-  } else {
+  const lexicon = runLexicon(position, request.lexicon)
+  if (position.kind === 'cgp') {
+    commands.push(`cgp ${splitCgp(position.cgp).fields}`)
+  } else if (position.kind === 'gcg') {
     // `load` leaves the game at its start.
     commands.push(`load ${position.source}`, `goto ${request.goto ?? 'end'}`)
   }

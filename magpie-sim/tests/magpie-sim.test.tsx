@@ -189,3 +189,60 @@ for (const [surface, bodyColumns] of [
     await ui.unmount()
   })
 }
+
+// Fifty plays of seven tiles, as a sim of 50 plays prints them: a tall pane
+// lists the top 15, and its pictures stay inside what one tree may hold.
+const FIFTY_TEXT = [
+  '# lexicon NWL23',
+  ...Array.from({ length: 50 }, (_, index) => {
+    const id = `${(index % 15) + 1}${'ABCD'[Math.floor(index / 15)] ?? 'A'} ETAERIO`
+    return `${index + 1}:  ${id}    70 - ${(60 - index * 0.5).toFixed(2)} 0.07 30.00 0.19 70.00 5000 30.00 20.00 10.00 40.00 20.00 10.00`
+  }),
+  '',
+  'Showing 50 of 50 plays',
+  'Showing 4 of 4 plies',
+  '',
+].join('\n')
+const MAX_IMAGE_SOURCE = 2 * 1024 * 1024
+
+test('a tall pane lists the top 15 plays, its pictures inside the tree budget', async ($, on) => {
+  on('ui.blit', () => ({ value: {} }) as never)
+  on('fs.read', (_$, e) =>
+    (e.as === 'bytes' ? { value: { base64: fixtureFont().toBase64() } } : { value: FIFTY_TEXT }) as never,
+  )
+  const ui = await $.ui.mount({
+    plugin: 'magpie-sim',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'magpie-results',
+    props: {
+      title: 'MAGPIE sim',
+      isFocused: true,
+      bodyColumns: 160,
+      placement: 'inline',
+      scroll: { offset: 0, bodyRows: 90 },
+      view: {},
+    },
+  })
+  const tree = await ui.drawn()
+  const images = await ui.findAll({ type: 'Image' })
+  expect(images.filter(image => image.key?.startsWith('tiles-'))).toHaveLength(15)
+  expect(await ui.find({ type: 'Text', text: /top 15 of 50/ })).toBeDefined()
+  // Every picture's decoded bytes, as Claude Code counts them.
+  let bytes = 0
+  const walk = (node: unknown) => {
+    if (typeof node !== 'object' || node === null) {
+      return
+    }
+    const { type, props, children } = node as { type?: string; props?: { source?: { png?: string; rgba?: string } }; children?: unknown[] }
+    const source = type === 'Image' ? (props?.source?.png ?? props?.source?.rgba) : undefined
+    bytes += source === undefined ? 0 : Math.floor((source.length * 3) / 4)
+    for (const child of children ?? []) {
+      walk(child)
+    }
+  }
+  walk(tree)
+  expect(bytes).toBeGreaterThan(1_000_000)
+  expect(bytes).toBeLessThan(MAX_IMAGE_SOURCE)
+  await ui.unmount()
+})

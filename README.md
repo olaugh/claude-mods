@@ -36,10 +36,10 @@ joined) and turns into a check mark for 1.5 s, like the Claude desktop app. Besi
 ### magpie-sim
 
 Sims a crossword position in [MAGPIE](https://github.com/jvc56/MAGPIE) and shows the results in a pane: a picture of
-the board with the selected play on it, beside a table of the top 50 plays (win%, equity, static equity, iterations, the
+the board with the selected play on it, beside a table of the sim's top 15 plays (win%, equity, static equity, iterations, the
 opponent's mean reply and bingo rate), each play spelled in tiles: bright green for the tiles it plays, darker green for
 the board's own it plays through, blanks' letters grey. Click a row to put its play on the board; click a heading to
-sort by it (again to flip); the wheel scrolls the rows.
+sort those 15 by it (again to flip); the wheel scrolls the rows.
 
 Say what to sim after `/magpie` in your own words. A model (Haiku) reads them into a request, knowing what the pane
 shows and which lexicons MAGPIE has; the rest is MAGPIE's:
