@@ -150,7 +150,7 @@ test('the MAGPIE run for each kind of position', () => {
   const rack = magpieRun({ kind: 'rack', rack: 'ADOPQRR' }, {}, 10, { rit: true, wit: true })
   expect(rack.args.slice(0, 3)).toEqual(['setoptions', '-lex', 'CSW24'])
   expect(rack.args.join(' ')).toContain('-wmp true -rit true -wit true')
-  expect(rack.args.join(' ')).toContain('-numplays 50 -plies 2 -iterations 1000000 -sr rr')
+  expect(rack.args.join(' ')).toContain('-numplays 50 -plies 2 -iterations 250000 -sr rr')
   expect(rack.stdin).toBe('rack ADOPQRR\nshgame\ngsimulate\n')
 
   const cgp = magpieRun({ kind: 'cgp', cgp: CGP }, {}, 10, { rit: false, wit: false })

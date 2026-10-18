@@ -7,9 +7,9 @@
 import { BOARD_DIM } from './layout'
 
 export const DEFAULT_LEXICON = 'CSW24'
-// 20,000 iterations for each of the top 50 plays, shared evenly.
+// 5,000 iterations for each of the top 50 plays, shared evenly.
 export const SIM_PLAYS = 50
-export const ITERATIONS_PER_PLAY = 20000
+export const ITERATIONS_PER_PLAY = 5000
 export const SIM_PLIES = 2
 // Long enough never to cut the iterations short.
 const SIM_TIME_LIMIT_SECONDS = 3600
