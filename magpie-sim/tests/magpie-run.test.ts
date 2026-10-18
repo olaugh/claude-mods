@@ -3,6 +3,13 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import {
   canonicalWord,
+  commitCommands,
+  fitsDescription,
+  parseGenerated,
+  playSquares,
+  racksFor,
+  wordOnBoard,
+  type MoveDescription,
   cgpUnseen,
   checkLexicon,
   choosePosition,
@@ -23,7 +30,7 @@ import {
 import { headerLine, reportLines, rowLine, tableLayout } from '../hooks/register'
 import { cardPicture } from '../hooks/card'
 import { encodePng } from '../hooks/png'
-import { parseSim, placedTiles, rackGhosts, resultText } from '../hooks/sim'
+import { parseBoard, parseSim, placedTiles, rackGhosts, resultText } from '../hooks/sim'
 import { parseFont } from '../hooks/truetype'
 import { fixtureFont } from './font-fixture'
 
@@ -671,4 +678,173 @@ test("the phone's picture draws a sim and an endgame, leaves and all", () => {
   }
   // An endgame play that keeps tiles shows them: 10H (S)LIVE keeps DER.
   expect(parseSim(ENDGAME_SOLVE).plays[1]?.leave).toBe('DER')
+})
+
+// What `generate` printed after 8G QI: the board, then the first of the plays
+// from AEINRST (and H3 INERT(I)AS, further down its list).
+const GENERATED_INERTIAS = `
+   A B C D E F G H I J K L M N O     Player 1           22
+   ------------------------------  > Player 2           0
+ 1|=     '       =       '     = |
+ 2|  -       "       "       -   |   Unseen: 98 (41v | 55c)
+ 3|    -       '   '       -     |   ? ? A A A A A A A A
+ 4|'     -       '       -     ' |   A B B C C D D D D E
+ 5|        -           -         |   E E E E E E E E E E
+ 6|  "       "       "       "   |   E F F G G G H H I I
+ 7|    '       '   '       '     |   I I I I I I J K L L
+ 8|=     '     Q I       '     = |   L L M M N N N N N N
+ 9|    '       '   '       '     |   O O O O O O O O P P
+10|  "       "       "       "   |   R R R R R R S S S S
+11|        -           -         |   T T T T T T U U U U
+12|'     -       '       -     ' |   V V W W X Y Y Z
+13|    -       '   '       -     |   Event 1 (Player 1):
+14|  -       "       "       -   |   8G QI 22 IQ
+15|=     '       =       '     = |
+   ------------------------------
+
+1:     H8 (I)NERTIAS          77 77.00
+2:     9C RETAINS             74 74.00
+3:     9C RETSINA             74 74.00
+4:     9B STEARIN             73 73.00
+5:     9D RATINES             73 73.00
+6:     9D RETINAS             73 73.00
+40:    H3 INERT(I)AS          59 59.00
+Showing 1365 of 1365 plays
+`
+
+// And after H8 (I)NERTIAS, from ZG: ZAG through its A is one of them.
+const GENERATED_ZAG = `
+   A B C D E F G H I J K L M N O   > Player 1           22
+   ------------------------------    Player 2           77
+ 1|=     '       =       '     = |
+ 2|  -       "       "       -   |   Unseen: 91 (38v | 51c)
+ 3|    -       '   '       -     |   ? ? A A A A A A A A
+ 4|'     -       '       -     ' |   B B C C D D D D E E
+ 5|        -           -         |   E E E E E E E E E F
+ 6|  "       "       "       "   |   F G G G H H I I I I
+ 7|    '       '   '       '     |   I I I J K L L L L M
+ 8|=     '     Q I       '     = |   M N N N N N O O O O
+ 9|    '       ' N '       '     |   O O O O P P R R R R
+10|  "       "   E   "       "   |   R S S S T T T T T U
+11|        -     R     -         |   U U U V V W W X Y Y
+12|'     -       T       -     ' |   Z
+13|    -       ' I '       -     |   Event 2 (Player 2):
+14|  -       "   A   "       -   |   H8 (I)NERTIAS 77 AEINRST
+15|=     '       S       '     = |
+   ------------------------------
+
+1:   13G Z(I)G    25 25.00
+2:   13G G(I)  Z  5  13.39
+3:   14G Z(A)G    13 13.00
+4:   14H (A)G  Z  3  11.39
+5:   (exch G)  Z  0  8.39
+6:   10G Z(E)  G  11 7.82
+7:   14G Z(A)  G  11 7.82
+8:   (exch GZ)    0  0.00
+9:   (exch Z)  G  0  -3.18
+10:  pass      GZ 0  -1000.00
+Showing 10 of 10 plays
+`
+
+test('a described move is found among the legal plays', () => {
+  const inertias = parseGenerated(GENERATED_INERTIAS).flat()
+  expect(inertias.length).toBe(7)
+  const board = parseBoard(GENERATED_INERTIAS.split('\n')) ?? []
+  expect(board[7]).toBe('......QI.......')
+  // Two placements of INERTIAS; the square or the score picks one.
+  const fits = (move: MoveDescription, plays = inertias, on = board) =>
+    plays.filter(play => fitsDescription(play, move, on)).map(play => `${play.coordinate} ${play.word} ${play.score}`)
+  expect(fits({ word: 'INERTIAS' })).toEqual(['H8 (I)NERTIAS 77', 'H3 INERT(I)AS 59'])
+  expect(fits({ word: 'inertias', score: 59 })).toEqual(['H3 INERT(I)AS 59'])
+  expect(fits({ word: 'INERTIAS', square: 'h8' })).toEqual(['H8 (I)NERTIAS 77'])
+  expect(fits({ word: 'INERTIAS', direction: 'across' })).toEqual([])
+  expect(fits({ word: 'INERTIAS', premium: 'TW' })).toEqual(['H8 (I)NERTIAS 77'])
+  expect(fits({ word: 'INERTIAS', through: [{ letter: 'I', word: 'QI' }] })).toEqual(['H8 (I)NERTIAS 77', 'H3 INERT(I)AS 59'])
+
+  // ZAG through the A of INERTIAS: just one; ZIG and the rest are not it.
+  const zagBoard = parseBoard(GENERATED_ZAG.split('\n')) ?? []
+  const zag = parseGenerated(GENERATED_ZAG).flat()
+  expect(wordOnBoard(zagBoard, 'INERTIAS')).toEqual([
+    [7, 8, 9, 10, 11, 12, 13, 14].map(row => ({ row, col: 7 })),
+  ])
+  expect(fits({ word: 'ZAG', through: [{ letter: 'A', word: 'INERTIAS' }] }, zag, zagBoard)).toEqual(['14G Z(A)G 13'])
+  expect(fits({ word: 'ZAG', through: [{ letter: 'A', word: 'QI' }] }, zag, zagBoard)).toEqual([])
+  expect(fits({ word: 'ZIG' }, zag, zagBoard)).toEqual(['13G Z(I)G 25'])
+})
+
+test('the racks to look for a move from, and the commits that replay it', () => {
+  expect(racksFor({ word: 'ZAG', through: [{ letter: 'A', word: 'INERTIAS' }] })).toEqual(['ZG'])
+  expect(racksFor({ word: 'ZAG' })).toEqual(['ZAG'])
+  // Eight letters: one was the board's, each letter in turn.
+  expect(racksFor({ word: 'INERTIAS' })).toEqual(['NERTIAS', 'IERTIAS', 'INRTIAS', 'INETIAS', 'INERIAS', 'INERTIS', 'INERTIA'])
+  expect(racksFor({ word: 'QUIXOTISMS' })).toEqual([])
+  expect(commitCommands([{ coordinate: 'H8', word: '(I)NERTIAS' }, { coordinate: 'pass', word: '' }, { coordinate: '14G', word: 'Z(A)G' }])).toEqual([
+    'rack NERTIAS',
+    'commit H8 .NERTIAS',
+    'commit pass',
+    'rack ZG',
+    'commit 14G Z.G',
+  ])
+  expect(playSquares('14G', 'Z(A)G')).toEqual([
+    { row: 13, col: 6, letter: 'Z', isThrough: false },
+    { row: 13, col: 7, letter: 'A', isThrough: true },
+    { row: 13, col: 8, letter: 'G', isThrough: false },
+  ])
+})
+
+test("a play intent's moves, read from the interpreter", () => {
+  expect(
+    parseIntent(
+      '{"action":"play","moves":[{"word":"INERTIAS","by":"me"},{"word":"zag","by":"opponent","through":[{"letter":"a","word":"inertias"}]},{"pass":true}],"rack":"?hilops"}',
+    ),
+  ).toEqual({
+    action: 'play',
+    moves: [
+      { word: 'INERTIAS', by: 'me' },
+      { word: 'ZAG', by: 'opponent', through: [{ letter: 'A', word: 'INERTIAS' }] },
+      { word: '', pass: true },
+    ],
+    rack: '?HILOPS',
+  })
+  expect(() => parseIntent('{"action":"play","moves":[],"rack":"POLISHES"}')).toThrow()
+})
+
+// The pane showing AEINRST after 8G QI, then `/magpie inertias was played,
+// opp played zag through the a in inertias, next rack polish?`.
+test('/magpie plays on: each move found on the board, then the new rack simmed', async ($, on) => {
+  const runs: { argv: readonly string[]; stdin?: string }[] = []
+  const shownRack = 'AEINRST'
+  on('process.run', (_$, e) => {
+    runs.push({ argv: e.argv, stdin: e.init?.stdin })
+    const stdin = e.init?.stdin ?? ''
+    const stdout =
+      e.argv[0] === 'printenv'
+        ? '/home/test\n'
+        : e.argv[0] === 'getconf'
+          ? '12\n'
+          : stdin.includes(`rack ${shownRack}\ngenerate`)
+            ? GENERATED_INERTIAS
+            : stdin.includes('rack ZG\ngenerate')
+              ? GENERATED_ZAG
+              : // The sims: AEINRST's shows INERTIAS on top, as the pane did.
+                `\n   A B C D E F G H I J K L M N O   > Player 1  ${shownRack}  0\n\n1:  H8 (I)NERTIAS  77 - 61.50 0.2 73.50 0.5 77.00 5000 30.0 20.0 10.0 40.0 20.0 10.0\n2:  H3 INERT(I)AS  59 - 50.00 0.2 50.00 0.5 59.00 5000 30.0 20.0 10.0 40.0 20.0 10.0\n\nShowing 2 of 2 plays\nShowing 2 of 4 plies\n`
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } as never
+  })
+  on('fs.exists', () => ({ value: true }) as never)
+  on('fs.list', () => ({ value: [{ name: 'CSW24.kwg', kind: 'file', size: 1 }] }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  const replies = [
+    '{"action":"play","moves":[{"word":"INERTIAS","by":"me"},{"word":"ZAG","by":"opponent","through":[{"letter":"A","word":"INERTIAS"}]}],"rack":"?HILOPS"}',
+  ]
+  on('model.complete', () => {
+    const usage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
+    return { value: { isAnswered: true, text: replies.shift() ?? '', usage } } as never
+  })
+  await $.tool.call({ tool: 'mcp__magpie-sim__simulate', position: shownRack, after: [{ coordinate: '8G', word: 'QI' }] } as never)
+  const { text } = await $.command.run({ command: 'magpie', args: 'inertias was played. opp played zag through the a in inertias. next rack for me is polish?' } as never)
+  expect(text).toContain('Played H8 (I)NERTIAS for 77 (the top of its placements), then 14G Z(A)G for 13.')
+  expect(text).toContain('Simulating ?HILOPS')
+  const zagSearch = runs.find(run => run.stdin?.includes('rack ZG\ngenerate'))
+  expect(zagSearch?.stdin).toBe('rack QI\ncommit 8G QI\nrack NERTIAS\ncommit H8 .NERTIAS\nshgame\nrack ZG\ngenerate\n')
+  expect(zagSearch?.argv.join(' ')).toContain('-wmp false')
 })

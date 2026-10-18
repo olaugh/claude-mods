@@ -56,6 +56,18 @@ shows and which lexicons MAGPIE has; the rest is MAGPIE's:
 /magpie csw                              the same position again in another lexicon (it says if that is the one in use)
 ```
 
+Play on from what the pane shows by saying what happened, as a game goes on:
+
+```
+/magpie inertias was played. opp played zag through the a in inertias. next rack for me is polish?
+```
+
+The model turns that into moves and a rack (`polish?` is ?HILOPS); each move is then found among the legal plays
+MAGPIE generates on the board so far (in milliseconds), narrowed by what you said: square, direction, score, the tiles
+it went through, "to the TWS". Your own move is the sim's best-ranked placement of the word, the one the pane showed;
+the opponent's, when it fits more than one place, is asked about, and a move that fits nowhere says so and where the
+word does fit. With no rack given, `/magpie` asks for it; then the new position is simmed.
+
 A game's position left out is its latest with a player to move. When a turn, rack or word fits more than one
 position, `/magpie` lists them and asks which. Asking Claude ("sim AEINRST after 8G VAV") works too: the mod gives the
 model a `simulate` tool that takes the same request as fields and reports the top plays back.

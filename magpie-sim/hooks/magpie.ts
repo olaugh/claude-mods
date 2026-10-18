@@ -4,7 +4,7 @@
 // MAGPIE reading commands, then the position and `gsimulate` on its
 // standard input.
 
-import { BOARD_DIM } from './layout'
+import { BOARD_DIM, COLUMN_LETTERS, premiumAt } from './layout'
 
 export const DEFAULT_LEXICON = 'CSW24'
 // 5,000 iterations for each of the top 50 plays, shared evenly.
@@ -15,6 +15,8 @@ export const SIM_PLIES = 4
 const SIM_TIME_LIMIT_SECONDS = 3600
 // More `next`s than any game has events; the ones past its end only say so.
 const SCAN_STEPS = 150
+// The tiles a rack holds.
+const RACK_TILES = 7
 
 /** A play as `commit` takes it: `8G VAV`, lowercase a blank. */
 export type PlacedMove = { coordinate: string; word: string }
@@ -22,13 +24,15 @@ export type PlacedMove = { coordinate: string; word: string }
 export type Position =
   /** A rack to move with, after the moves played before it, if any. */
   | { kind: 'rack'; rack: string; after?: PlacedMove[] }
-  | { kind: 'cgp'; cgp: string }
+  // The rest, each with the moves played after it and the rack to move with
+  // then, when moves followed.
+  | { kind: 'cgp'; cgp: string; after?: PlacedMove[]; rack?: string }
   /** A path, URL or cross-tables or Woogles game id: MAGPIE's `load` fetches it. */
-  | { kind: 'gcg'; source: string }
+  | { kind: 'gcg'; source: string; after?: PlacedMove[]; rack?: string }
   /** A URL of unknown content: fetched, then read as a CGP or a GCG. */
-  | { kind: 'url'; url: string }
+  | { kind: 'url'; url: string; after?: PlacedMove[]; rack?: string }
   /** A local file of unknown content: read, then the same. */
-  | { kind: 'file'; path: string }
+  | { kind: 'file'; path: string; after?: PlacedMove[]; rack?: string }
 
 /** Which position of a GCG to sim. */
 export type Selector =
@@ -95,6 +99,9 @@ export type Intent =
       /** MAGPIE's goto: events played, or start or end. */
       event?: number | 'start' | 'end'
     }
+  /** Moves played on from what the pane shows, in order, then the rack to
+   * move with (left out: asked for). */
+  | { action: 'play'; moves: MoveDescription[]; rack?: string }
   | { action: 'navigate'; to: Navigation }
   | { action: 'lexicon'; lexicon: string }
   | { action: 'reopen' }
@@ -103,9 +110,19 @@ export type Intent =
   | { action: 'unclear'; question: string }
 
 /** What the interpreter knows of the pane: the analysis it shows, if any,
- * and the lexicons MAGPIE has. */
+ * the moves played to reach it, the rack to move with, its top plays; and
+ * the lexicons MAGPIE has. */
 export type InterpreterContext = {
-  current?: { label: string; source: string; lexicon: string; turn?: number; turns?: number }
+  current?: {
+    label: string
+    source: string
+    lexicon: string
+    turn?: number
+    turns?: number
+    moves?: readonly string[]
+    rack?: string
+    topPlays?: readonly string[]
+  }
   lexica: readonly string[]
 }
 
@@ -117,12 +134,19 @@ export function interpreterPrompt(text: string, context: InterpreterContext): { 
     current === undefined
       ? 'The pane shows nothing yet.'
       : [
-          `The pane shows ${current.label} (from ${current.source})`,
-          current.lexicon === '' ? '' : `in ${current.lexicon}`,
-          current.turn === undefined ? '' : `at turn ${current.turn} of ${current.turns ?? '?'}`,
+          [
+            `The pane shows ${current.label} (from ${current.source})`,
+            current.lexicon === '' ? '' : `in ${current.lexicon}`,
+            current.turn === undefined ? '' : `at turn ${current.turn} of ${current.turns ?? '?'}`,
+          ]
+            .filter(part => part !== '')
+            .join(' ') + '.',
+          current.moves === undefined || current.moves.length === 0 ? '' : `Moves played to reach it: ${current.moves.join(', ')}.`,
+          current.rack === undefined || current.rack === '' ? 'The rack to move with is not known yet.' : `The player to move (the person) holds ${current.rack}.`,
+          current.topPlays === undefined || current.topPlays.length === 0 ? '' : `Its top plays: ${current.topPlays.join(', ')}.`,
         ]
           .filter(part => part !== '')
-          .join(' ') + '.'
+          .join('\n')
   const lexica =
     context.lexica.length === 0
       ? 'The lexicons installed are not known; use the usual names (CSW24, NWL23).'
@@ -146,6 +170,9 @@ The object is one of:
 - {"action":"reopen"} to show the pane again without a new analysis.
 - {"action":"picture"} to send a picture of what the pane shows ("send it to my phone", "picture", "image").
 - {"action":"unclear","question":"..."} when you cannot tell what they mean; ask one short question.
+- {"action":"play","moves":[...],"rack":"..."} when the person tells what was played from the position the pane shows, as a game goes on: each move in order, then the rack they now hold.
+  A move: {"word":"INERTIAS"} with whatever they said of it: "by" ("me" for the person, "opponent"), "square" (its first tile's square, 8H or H8 as above), "direction" ("across" or "down"), "score", "through" (tiles on the board it went through: [{"letter":"A","word":"INERTIAS"}], the word on the board each is in), "premium" ("TW", "DW", "TL" or "DL": "to the TWS" is TW). A pass is {"pass":true}. The word is in capitals, the board's tiles in it included. Moves alternate: the person's own first move is from the rack they hold, often one of the top plays.
+  "rack": the tiles they hold now, in capitals, ? for a blank; a ? after letters is the blank ("polish?" is ?HILOPS, not a question), and a rack is not a word to look up. Leave it out when they have not said.
 
 Words like "sim", "opening", "rack", "the", "turn", "where", "played" only say what the rest is. Words are case-insensitive except as "after" says.
 
@@ -159,6 +186,9 @@ Examples:
 "game.gcg after silvered" -> {"action":"sim","position":"game.gcg","word":"SILVERED","relation":"after"}
 "game.gcg DEEILRV" -> {"action":"sim","position":"game.gcg","letters":"DEEILRV"}
 "turn 14" -> {"action":"sim","turn":14}
+"inertias was played. opp played zag through the a in inertias. next rack for me is polish?" -> {"action":"play","moves":[{"word":"INERTIAS","by":"me"},{"word":"ZAG","by":"opponent","through":[{"letter":"A","word":"INERTIAS"}]}],"rack":"?HILOPS"}
+"I played qi at 8g for 22, they passed, now I have aeinrst" -> {"action":"play","moves":[{"word":"QI","by":"me","square":"8G","score":22},{"pass":true,"by":"opponent"}],"rack":"AEINRST"}
+"my rack is now deeilrv" -> {"action":"play","moves":[],"rack":"DEEILRV"}
 "prev" -> {"action":"navigate","to":"previous"}
 "csw" -> {"action":"lexicon","lexicon":"CSW24"}`
   return { system, prompt: `${state}\n${lexica}\n\nWhat they typed: ${text}` }
@@ -197,6 +227,14 @@ export function parseIntent(reply: string): Intent {
       return { action: 'reopen' }
     case 'picture':
       return { action: 'picture' }
+    case 'play': {
+      const moves = Array.isArray(fields.moves) ? fields.moves.map(parseMove) : []
+      const rack = text('rack')?.toUpperCase()
+      if (rack !== undefined && !RACK.test(rack)) {
+        throw new Error(`a rack is 1 to 7 tiles, not "${rack}"`)
+      }
+      return rack === undefined ? { action: 'play', moves } : { action: 'play', moves, rack }
+    }
     case 'unclear':
       return { action: 'unclear', question: text('question') ?? 'What should I sim?' }
     case 'sim': {
@@ -660,27 +698,34 @@ export function describePosition(position: GcgPosition): string {
   return `turn ${position.turn}: ${position.player} to move with ${position.rack}${move}`
 }
 
-/** The run for a position already in MAGPIE's terms: a rack, a CGP's text,
- * or a GCG's source and the `goto` that reaches its position. `shgame`
- * prints the board the picture draws. */
-export function magpieRun(
-  position: { kind: 'rack'; rack: string; after?: PlacedMove[] } | { kind: 'cgp'; cgp: string } | { kind: 'gcg'; source: string },
-  request: { lexicon?: string; goto?: string },
-  threads: number,
-  accelerators: Accelerators,
-  mode: Mode = 'sim',
-): MagpieRun {
+/** A position already in MAGPIE's terms: a rack, a CGP's text, or a GCG's
+ * source; each with the moves played after it and the rack to move with
+ * then (a rack position's always; a CGP's or GCG's when moves followed). */
+export type Resolved =
+  | { kind: 'rack'; rack: string; after?: PlacedMove[] }
+  | { kind: 'cgp'; cgp: string; after?: PlacedMove[]; rack?: string }
+  | { kind: 'gcg'; source: string; after?: PlacedMove[]; rack?: string }
+
+/** The commands that commit moves, whoever's turn: each from a rack of just
+ * its tiles. `commit` reads a board tile as `.`, not in parentheses. */
+export function commitCommands(moves: readonly PlacedMove[]): string[] {
+  return moves.flatMap(move =>
+    move.coordinate === 'pass'
+      ? ['commit pass']
+      : [
+          `rack ${tilesFromRack(move.word)}`,
+          `commit ${move.coordinate} ${move.word.replace(/\(([^)]*)\)/g, (_, onBoard: string) => '.'.repeat(onBoard.length))}`,
+        ],
+  )
+}
+
+// The commands that reach a position, before what it is for: the board and
+// the moves after it, not the rack to move with.
+function setupCommands(position: Resolved, request: { lexicon?: string; goto?: string }) {
   const commands: string[] = []
   let lexicon = request.lexicon
   if (position.kind === 'rack') {
     lexicon ??= DEFAULT_LEXICON
-    // Each earlier move from a rack of just its tiles, whoever's turn.
-    // `commit` reads a board tile as `.`, not in parentheses.
-    for (const move of position.after ?? []) {
-      const word = move.word.replace(/\(([^)]*)\)/g, (_, onBoard: string) => '.'.repeat(onBoard.length))
-      commands.push(`rack ${tilesFromRack(move.word)}`, `commit ${move.coordinate} ${word}`)
-    }
-    commands.push(`rack ${position.rack}`)
   } else if (position.kind === 'cgp') {
     const { fields, lexicon: cgpLexicon } = splitCgp(position.cgp)
     lexicon ??= cgpLexicon ?? DEFAULT_LEXICON
@@ -689,10 +734,241 @@ export function magpieRun(
     // `load` leaves the game at its start.
     commands.push(`load ${position.source}`, `goto ${request.goto ?? 'end'}`)
   }
+  commands.push(...commitCommands(position.after ?? []))
+  return { commands, lexicon }
+}
+
+/** The run for a position: reached, its rack set, then simmed or its
+ * endgame solved. `shgame` prints the board the picture draws. */
+export function magpieRun(
+  position: Resolved,
+  request: { lexicon?: string; goto?: string },
+  threads: number,
+  accelerators: Accelerators,
+  mode: Mode = 'sim',
+): MagpieRun {
+  const { commands, lexicon } = setupCommands(position, request)
+  if (position.rack !== undefined && position.rack !== '') {
+    commands.push(`rack ${position.rack}`)
+  }
   commands.push('shgame', mode === 'endgame' ? 'endgame' : 'gsimulate')
   return {
     args: ['setoptions', ...(mode === 'endgame' ? endgameOptions(lexicon, threads) : simOptions(lexicon, threads, accelerators))],
     stdin: `${commands.join('\n')}\n`,
     lexicon: lexicon ?? '',
   }
+}
+
+// Every legal play listed, however many.
+const ALL_PLAYS = 10000
+
+/** The run that lists every legal play of the player to move from each of
+ * `racks`, on the board the position reaches: a move's legal placements.
+ * No wordmap: the lexicon's DAWG alone, which loads at once. */
+export function generateRun(position: Resolved, request: { lexicon?: string; goto?: string }, racks: readonly string[]): MagpieRun {
+  const { commands, lexicon } = setupCommands(position, request)
+  commands.push('shgame', ...racks.flatMap(rack => [`rack ${rack}`, 'generate']))
+  return {
+    args: [
+      'setoptions',
+      ...(lexicon === undefined ? [] : ['-lex', lexicon]),
+      '-wmp', 'false',
+      '-s1', 'equity', '-s2', 'equity', '-r1', 'all', '-r2', 'all',
+      '-numplays', String(ALL_PLAYS), '-maxnumdplays', String(ALL_PLAYS), '-shwithmoves', 'false',
+      '-hr', 'false',
+      ...ASCII_BOARD,
+    ],
+    stdin: `${commands.join('\n')}\n`,
+    lexicon: lexicon ?? '',
+  }
+}
+
+/** A legal play as `generate` lists it: `H8 (I)NERTIAS 77 77.00`. */
+export type GeneratedPlay = { coordinate: string; word: string; score: number; equity: number }
+
+const GENERATED = /^\s*\d+:\s+(\d+[A-O]|[A-O]\d+)\s+(\S+)\s+(?:\S+\s+)?(-?\d+)\s+(-?\d+(?:\.\d+)?)\s*$/
+
+/** Each `generate`'s placements (exchanges and passes left out), in order,
+ * each list closed by its `Showing N of M plays`. */
+export function parseGenerated(output: string): GeneratedPlay[][] {
+  const lists: GeneratedPlay[][] = []
+  let list: GeneratedPlay[] = []
+  for (const line of output.split('\n')) {
+    const play = GENERATED.exec(line)
+    if (play !== null) {
+      list.push({ coordinate: play[1] ?? '', word: play[2] ?? '', score: Number(play[3]), equity: Number(play[4]) })
+    } else if (/^Showing \d+ of \d+ plays/.test(line)) {
+      lists.push(list)
+      list = []
+    }
+  }
+  return lists
+}
+
+/** A move as the person described it: its word (the board's tiles in it
+ * included) and whatever narrows where it went. */
+export type MoveDescription = {
+  word: string
+  by?: 'me' | 'opponent'
+  /** `8H` across, `H8` down: where its first tile is. */
+  square?: string
+  direction?: 'across' | 'down'
+  score?: number
+  /** Board tiles it went through, each with the word on the board it is in. */
+  through?: { letter: string; word?: string }[]
+  /** A premium square one of its tiles covers: "to the TWS". */
+  premium?: 'TW' | 'DW' | 'TL' | 'DL'
+  /** A pass, which has no word. */
+  pass?: true
+}
+
+const letters = (word: string) => word.replace(/[^A-Za-z]/g, '').toUpperCase()
+
+/** Where each tile of a play goes, the board's own (in parentheses) marked. */
+export function playSquares(coordinate: string, word: string): { row: number; col: number; letter: string; isThrough: boolean }[] {
+  const across = /^(\d+)([A-O])$/.exec(coordinate)
+  const down = /^([A-O])(\d+)$/.exec(coordinate)
+  const row = Number(across?.[1] ?? down?.[2]) - 1
+  const col = COLUMN_LETTERS.indexOf(across?.[2] ?? down?.[1] ?? '')
+  const squares: { row: number; col: number; letter: string; isThrough: boolean }[] = []
+  let isThrough = false
+  for (const char of word) {
+    if (char === '(' || char === ')') {
+      isThrough = char === '('
+      continue
+    }
+    const offset = squares.length
+    squares.push({ row: row + (down !== null ? offset : 0), col: col + (across !== null ? offset : 0), letter: char, isThrough })
+  }
+  return squares
+}
+
+/** The squares of each run of tiles on `board` that spells `word`, across
+ * or down. */
+export function wordOnBoard(board: readonly string[], word: string): { row: number; col: number }[][] {
+  const target = letters(word)
+  const found: { row: number; col: number }[][] = []
+  const scan = (at: (line: number, index: number) => { row: number; col: number }) => {
+    for (let line = 0; line < BOARD_DIM; line++) {
+      let run: { row: number; col: number }[] = []
+      for (let index = 0; index <= BOARD_DIM; index++) {
+        const square = index < BOARD_DIM ? at(line, index) : undefined
+        const tile = square === undefined ? '.' : (board[square.row]?.[square.col] ?? '.')
+        if (tile !== '.' && square !== undefined) {
+          run.push(square)
+          continue
+        }
+        if (run.length > 1 && run.map(({ row, col }) => board[row]?.[col] ?? '').join('').toUpperCase() === target) {
+          found.push(run)
+        }
+        run = []
+      }
+    }
+  }
+  scan((line, index) => ({ row: line, col: index }))
+  scan((line, index) => ({ row: index, col: line }))
+  return found
+}
+
+/** Whether a legal play is the move described. `board` is the board it was
+ * played on, for what it went through. */
+export function fitsDescription(play: GeneratedPlay, description: MoveDescription, board: readonly string[]): boolean {
+  if (letters(play.word) !== letters(description.word)) {
+    return false
+  }
+  if (description.square !== undefined && play.coordinate !== description.square.toUpperCase()) {
+    return false
+  }
+  if (description.direction !== undefined && (description.direction === 'across') !== /^\d/.test(play.coordinate)) {
+    return false
+  }
+  if (description.score !== undefined && play.score !== description.score) {
+    return false
+  }
+  const squares = playSquares(play.coordinate, play.word)
+  const through = squares.filter(square => square.isThrough)
+  for (const { letter, word } of description.through ?? []) {
+    const runs = word === undefined ? undefined : wordOnBoard(board, word)
+    const isThere = through.some(
+      square =>
+        square.letter.toUpperCase() === letter.toUpperCase() &&
+        (runs === undefined || runs.some(run => run.some(({ row, col }) => row === square.row && col === square.col))),
+    )
+    if (!isThere) {
+      return false
+    }
+  }
+  if (description.premium !== undefined) {
+    const premium = description.premium
+    const isOn = squares.some(square => {
+      const there = premiumAt(square.row, square.col)
+      return !square.isThrough && (there === premium || (premium === 'DW' && there === 'CENTER'))
+    })
+    if (!isOn) {
+      return false
+    }
+  }
+  return true
+}
+
+/** The racks to find a described move from, its player's tiles unknown: the
+ * word's letters less the board's it went through; a word of more than a
+ * rack's tiles tries each letter it could have gone through. */
+export function racksFor(description: MoveDescription): string[] {
+  let tiles = [...letters(description.word)]
+  for (const { letter } of description.through ?? []) {
+    const at = tiles.indexOf(letter.toUpperCase())
+    if (at >= 0) {
+      tiles.splice(at, 1)
+    }
+  }
+  if (tiles.length <= RACK_TILES) {
+    return [tiles.join('')]
+  }
+  if (tiles.length > RACK_TILES + 1) {
+    return []
+  }
+  // One tile was the board's: each distinct letter in turn.
+  return [...new Set(tiles)].map(letter => {
+    const rest = [...tiles]
+    rest.splice(rest.indexOf(letter), 1)
+    return rest.join('')
+  })
+}
+
+const PREMIUMS: readonly NonNullable<MoveDescription['premium']>[] = ['TW', 'DW', 'TL', 'DL']
+
+// A move of a play intent, as the interpreter wrote it.
+function parseMove(value: unknown): MoveDescription {
+  const fields = (typeof value === 'object' && value !== null ? value : {}) as Record<string, unknown>
+  const by: Pick<MoveDescription, 'by'> = fields.by === 'me' || fields.by === 'opponent' ? { by: fields.by } : {}
+  if (fields.pass === true) {
+    return { word: '', pass: true, ...by }
+  }
+  if (typeof fields.word !== 'string' || letters(fields.word) === '') {
+    throw new Error('a move with no word')
+  }
+  const move: MoveDescription = { word: letters(fields.word), ...by }
+  if (typeof fields.square === 'string' && COORDINATE.test(fields.square.toUpperCase())) {
+    move.square = fields.square.toUpperCase()
+  }
+  if (fields.direction === 'across' || fields.direction === 'down') {
+    move.direction = fields.direction
+  }
+  if (typeof fields.score === 'number') {
+    move.score = fields.score
+  }
+  if (Array.isArray(fields.through)) {
+    move.through = fields.through.flatMap(item => {
+      const { letter, word } = (typeof item === 'object' && item !== null ? item : {}) as Record<string, unknown>
+      return typeof letter === 'string' && /^[A-Za-z]$/.test(letter)
+        ? [typeof word === 'string' && word !== '' ? { letter: letter.toUpperCase(), word: letters(word) } : { letter: letter.toUpperCase() }]
+        : []
+    })
+  }
+  const premium = PREMIUMS.find(name => name === fields.premium)
+  if (premium !== undefined) {
+    move.premium = premium
+  }
+  return move
 }

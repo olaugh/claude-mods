@@ -8,6 +8,11 @@ import {
   cgpUnseen,
   checkLexicon,
   choosePosition,
+  fitsDescription,
+  generateRun,
+  parseGenerated,
+  racksFor,
+  type GeneratedPlay,
   DEFAULT_LEXICON,
   describePosition,
   gcgPositions,
@@ -27,11 +32,14 @@ import {
   type InterpreterContext,
   type MagpieRun,
   type Mode,
+  type MoveDescription,
+  type PlacedMove,
+  type Resolved,
   type Selector,
   type SimRequest,
 } from './magpie'
 import { encodePng } from './png'
-import { describePlay, parseSim, playTiles, resultText, type Play, type Sim } from './sim'
+import { describePlay, parseBoard, parseSim, playTiles, resultText, type Play, type Sim } from './sim'
 import { boardSvg } from './svg'
 import { PICTURE_HEIGHT, PICTURE_WIDTH, SQUARE } from './theme'
 import { parseFont, type Font } from './truetype'
@@ -45,6 +53,8 @@ const DEFAULT_MAGPIE_DIR = '~/magpie'
 const INTERPRETER_MODEL = 'haiku'
 const INTERPRETER_MAX_TOKENS = 400
 const INTERPRETER_TIMEOUT_MS = 30_000
+// The pane's top plays the interpreter is told of.
+const TOP_PLAYS_TOLD = 8
 // Ten minutes, the most $.process.run allows.
 const RUN_TIMEOUT_MS = 600_000
 // The TUI's font (tui/assets/magpie.ttf), under its own licence beside it.
@@ -210,9 +220,24 @@ async function accelerators($: EngineInterface, magpie: Magpie, lexicon: string 
   return { rit: rit === true, wit: wit === true }
 }
 
-// The request with its position in MAGPIE's terms: a URL or file read and
-// told apart, a local path made absolute for MAGPIE's own directory.
-async function resolveRequest($: EngineInterface, request: SimRequest) {
+// The request with its position in MAGPIE's terms (Resolved), the moves
+// played after it and its rack carried over.
+async function resolveRequest($: EngineInterface, request: SimRequest): Promise<{ resolved: Resolved; lexicon?: string }> {
+  const found = await resolvePosition($, request)
+  const { after, rack } = request.position
+  return {
+    ...found,
+    resolved: {
+      ...found.resolved,
+      ...(after === undefined || after.length === 0 ? {} : { after }),
+      ...(rack === undefined || rack === '' || found.resolved.kind === 'rack' ? {} : { rack }),
+    },
+  }
+}
+
+// The position itself: a URL or file read and told apart, a local path made
+// absolute for MAGPIE's own directory.
+async function resolvePosition($: EngineInterface, request: SimRequest): Promise<{ resolved: Resolved; lexicon?: string }> {
   const position = request.position
   let lexicon = request.lexicon
   if (position.kind === 'rack' || position.kind === 'cgp') {
@@ -251,8 +276,6 @@ function magpieErrors(stdout: string, stderr: string, otherwise: string): string
   return lines.slice(0, 4).join('; ') || stderr.trim().slice(0, 300) || otherwise
 }
 
-
-type Resolved = { kind: 'rack'; rack: string } | { kind: 'cgp'; cgp: string } | { kind: 'gcg'; source: string }
 
 /** A sim ready to run: the position in MAGPIE's terms, and for a GCG the
  * `goto` that reaches it. */
@@ -798,11 +821,19 @@ async function interpret($: EngineInterface, text: string): Promise<Intent> {
   const shown = await readCurrent($)
   const context: InterpreterContext = { lexica: await lexica($) }
   if (shown !== undefined) {
+    // The moves played on from the position's start, and, unless its rack is
+    // still to come, the rack and the plays the pane ranks.
+    const after = shown.request.position.after ?? []
+    const isAwaitingRack = shown.request.position.rack === ''
+    const sim = isAwaitingRack ? undefined : await loadSim($).catch(() => undefined)
     context.current = {
       label: shown.label,
       source: shown.request.source,
       lexicon: shown.lexicon,
       ...(shown.turn === undefined ? {} : { turn: shown.turn, turns: shown.turns }),
+      moves: after.map(move => (move.coordinate === 'pass' ? 'pass' : `${move.coordinate} ${move.word}`)),
+      rack: sim?.rack ?? '',
+      topPlays: (sim?.plays ?? []).slice(0, TOP_PLAYS_TOLD).map(play => `${play.id} ${play.score}`),
     }
   }
   const { system, prompt } = interpreterPrompt(text, context)
@@ -820,6 +851,124 @@ async function interpret($: EngineInterface, text: string): Promise<Intent> {
   return parseIntent(reply.text)
 }
 
+// A position nobody has shown yet: the empty board, its rack to come.
+const EMPTY_BOARD: SimRequest = { position: { kind: 'rack', rack: '', after: [] }, label: 'the opening', source: '' }
+// The placements a question lists when a move fits several.
+const PLACEMENTS_LISTED = 6
+
+const placed = (move: PlacedMove) => (move.coordinate === 'pass' ? 'pass' : `${move.coordinate} ${move.word}`)
+
+function describeMove(move: MoveDescription): string {
+  const parts = [
+    move.square === undefined ? '' : `at ${move.square}`,
+    move.direction ?? '',
+    move.score === undefined ? '' : `for ${move.score}`,
+    ...(move.through ?? []).map(({ letter, word }) => `through the ${letter}${word === undefined ? '' : ` of ${word}`}`),
+    move.premium === undefined ? '' : `to a ${move.premium}`,
+  ]
+  return [move.word, ...parts].filter(part => part !== '').join(' ')
+}
+
+/** A play intent's moves found on the board in order, each a legal play of
+ * the word as described, and the position they reach: the request to sim,
+ * or the question to ask (a move that fits nowhere, or several places it
+ * could be the opponent's), or the rack to ask for. */
+async function resolvePlay(
+  $: EngineInterface,
+  intent: Extract<Intent, { action: 'play' }>,
+  shown: Current | undefined,
+): Promise<{ request: SimRequest; message?: string } | { answer: string; reopen?: true }> {
+  const base = shown?.request ?? EMPTY_BOARD
+  const isShownSim = shown !== undefined && (shown.request.position.rack ?? 'known') !== ''
+  const sim = isShownSim ? await loadSim($).catch(() => undefined) : undefined
+  if (intent.moves[0]?.by === 'opponent' && sim !== undefined) {
+    return {
+      answer: `In ${shown?.label ?? 'the pane'} it is your move, with ${sim.rack}: what did you play before ${intent.moves[0].word || 'that'}?`,
+    }
+  }
+  // What reaches the base position: the scan of a game, a CGP's lexicon.
+  const planned = await planSim($, { ...base, position: { ...base.position, rack: '' } })
+  if ('candidates' in planned) {
+    throw new Error(`which position of ${base.label} is not clear`)
+  }
+  const plan = planned.plan
+  const baseAfter = base.position.after ?? []
+  const played: PlacedMove[] = []
+  const notes: string[] = []
+  for (const [index, move] of intent.moves.entries()) {
+    if (move.pass === true) {
+      played.push({ coordinate: 'pass', word: '' })
+      notes.push('a pass')
+      continue
+    }
+    // The person's own first move is from the rack the pane shows; any
+    // other's tiles are unknown, so the word's own letters stand in.
+    const isMine = index === 0 && sim !== undefined && move.by !== 'opponent'
+    const racks = isMine ? [sim.rack] : racksFor(move)
+    if (racks.length === 0) {
+      return { answer: `${move.word} is too long to find without its square: say where it went (H8, 8H).` }
+    }
+    const position: Resolved = { ...plan.resolved, after: [...baseAfter, ...played] }
+    delete position.rack
+    const { result } = await execute($, plan.where, `finding ${move.word}`, generateRun(position, { lexicon: plan.lexicon, goto: plan.goto }, racks))
+    const board = parseBoard(result.stdout.split('\n')) ?? []
+    const legal = new Map(parseGenerated(result.stdout).flat().map(play => [`${play.coordinate} ${play.word}`, play]))
+    const fits = [...legal.values()].filter(play => fitsDescription(play, move, board))
+    if (fits.length === 0) {
+      const anywhere = [...legal.values()].filter(play => fitsDescription(play, { word: move.word }, board))
+      const why = magpieErrors(result.stdout, result.stderr, '')
+      return {
+        answer: [
+          `${describeMove(move)} is not a legal play here${why === '' ? '' : ` (${why})`}.`,
+          anywhere.length === 0
+            ? `${move.word} fits nowhere on this board: is the word or a blank (lowercase) right?`
+            : `${move.word} fits at ${anywhere
+                .slice(0, PLACEMENTS_LISTED)
+                .map(play => `${play.coordinate} ${play.word} ${play.score}`)
+                .join(', ')}: which?`,
+        ].join(' '),
+      }
+    }
+    // The person's own: the best the sim ranked (the play it showed), else
+    // the best by equity. Another's, in more than one place: ask.
+    const ranked = [...fits].sort((a, b) => {
+      const rank = (play: GeneratedPlay) => sim?.plays.findIndex(simmed => simmed.id === `${play.coordinate} ${play.word}`) ?? -1
+      const [rankA, rankB] = [rank(a), rank(b)].map(value => (value < 0 ? Number.MAX_SAFE_INTEGER : value))
+      return (rankA ?? 0) - (rankB ?? 0) || b.equity - a.equity || b.score - a.score
+    })
+    if (ranked.length > 1 && !isMine) {
+      return {
+        answer: [
+          `${describeMove(move)} fits ${ranked.length} places:`,
+          ...ranked.slice(0, PLACEMENTS_LISTED).map(play => `  ${play.coordinate} ${play.word} for ${play.score}`),
+          'Which? Say its square or score.',
+        ].join('\n'),
+      }
+    }
+    const chosen = ranked[0] as GeneratedPlay
+    played.push({ coordinate: chosen.coordinate, word: chosen.word })
+    notes.push(
+      `${chosen.coordinate} ${chosen.word} for ${chosen.score}${isMine && ranked.length > 1 ? ' (the top of its placements)' : ''}`,
+    )
+  }
+  const after = [...baseAfter, ...played]
+  const rack = intent.rack ?? ''
+  const recent = after.slice(-2).map(placed).join(', ')
+  const request: SimRequest = {
+    ...base,
+    position: { ...base.position, after, rack } as SimRequest['position'],
+    label: `${rack === '' ? 'next' : rack} after ${after.length > 2 ? '…, ' : ''}${recent}`,
+  }
+  const playedText = notes.length === 0 ? '' : `Played ${notes.join(', then ')}. `
+  if (rack === '') {
+    // Kept as what the pane stands on, so the rack alone can follow.
+    const pending: Current = { request, label: request.label, lexicon: shown?.lexicon ?? plan.lexicon ?? '' }
+    await update($, current, () => JSON.stringify(pending))
+    return { answer: `${playedText}What rack do you have now?` }
+  }
+  return { request, message: `${playedText}Simulating ${rack}` }
+}
+
 /** The request an intent makes, against what the pane shows; or the answer
  * itself, when there is nothing to run (a question, the pane reopened, a
  * lexicon already in use, the end of the game reached). */
@@ -833,6 +982,8 @@ async function requestFor(
       return { answer: intent.question }
     case 'reopen':
       return { answer: 'Opened the MAGPIE sim pane.', reopen: true }
+    case 'play':
+      return resolvePlay($, intent, shown)
     case 'picture':
       return shown === undefined
         ? { answer: 'There is nothing to show yet: sim a position first.' }
