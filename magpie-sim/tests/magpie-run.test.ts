@@ -327,21 +327,31 @@ function answerSpawns(
   } as never)
 }
 
-// Stands in for the host: HOME, the core count, the lexicons, MAGPIE (whose
-// scan of a GCG and whose sim answer from fixtures), and the model reading
-// /magpie's words, which answers `replies` in order.
-function fakeHost(on: On, scan = SCAN_ENDING, replies: string[] = [], endgame = '') {
+// A Linux computer's environment, as the hosts below stand in for it.
+const LINUX = { env: { HOME: '/home/test', TMPDIR: '/tmp/test' }, uname: 'Linux x86_64' }
+
+// Stands in for the host: the computer (Linux unless `machine` says),
+// HOME, the core count, the lexicons, MAGPIE (whose scan of a GCG and whose
+// sim answer from fixtures, its lines ended as `machine` ends them), and the
+// model reading /magpie's words, which answers `replies` in order.
+function fakeHost(
+  on: On,
+  scan = SCAN_ENDING,
+  replies: string[] = [],
+  endgame = '',
+  machine: { env: Record<string, string>; uname: string; newline?: string } = LINUX,
+) {
   const runs: { argv: readonly string[]; stdin?: string; cwd?: string }[] = []
+  mock.env(on, machine.env)
   const answer = (argv: readonly string[], stdin?: string) =>
-    argv[0] === 'printenv'
-      ? '/home/test\n'
+    argv[0] === 'uname'
+      ? `${machine.uname}\n`
       : argv[0] === 'getconf'
         ? '12\n'
-        : stdin?.includes('next\n')
-          ? scan
-          : stdin?.includes('endgame\n')
-            ? endgame
-            : CGP_OUTPUT
+        : (stdin?.includes('next\n') ? scan : stdin?.includes('endgame\n') ? endgame : CGP_OUTPUT).replaceAll(
+            '\n',
+            machine.newline ?? '\n',
+          )
   on('process.run', (_$, e) => {
     runs.push({ argv: e.argv, stdin: e.init?.stdin, cwd: e.init?.cwd })
     return {
@@ -361,9 +371,9 @@ function fakeHost(on: On, scan = SCAN_ENDING, replies: string[] = [], endgame = 
 }
 
 for (const [options, binary, cwd] of [
-  [undefined, '/home/test/magpie/bin/magpie', '/home/test/magpie'],
+  [undefined, '/home/test/.magpie/bin/magpie', '/home/test/.magpie'],
   [{ magpieDir: '/opt/magpie/' }, '/opt/magpie/bin/magpie', '/opt/magpie'],
-  [{ magpieDir: '' }, 'magpie', undefined],
+  [{ magpieDir: '~/magpie' }, '/home/test/magpie/bin/magpie', '/home/test/magpie'],
 ] as const) {
   test(`the simulate tool runs ${binary} and reports the top plays`, { options: options ?? {} }, async ($, on) => {
     const runs = fakeHost(on)
@@ -376,6 +386,31 @@ for (const [options, binary, cwd] of [
     expect(magpie?.stdin?.startsWith('cgp 15/15/')).toBe(true)
   })
 }
+
+// Windows: MAGPIE where it keeps its own data, the cores as Windows names
+// them, CRLF lines read as any others.
+const WINDOWS = {
+  env: { OS: 'Windows_NT', PROCESSOR_ARCHITECTURE: 'ARM64', USERPROFILE: 'C:\\Users\\test', LOCALAPPDATA: 'C:\\Users\\test\\AppData\\Local', NUMBER_OF_PROCESSORS: '8', TEMP: 'C:\\Temp' },
+  uname: '',
+  newline: '\r\n',
+}
+
+test('on Windows the simulate tool runs magpie.exe from %LOCALAPPDATA%\\MAGPIE', async ($, on) => {
+  const runs = fakeHost(on, SCAN_ENDING, [], '', WINDOWS)
+  fakePictures(on)
+  const result = JSON.stringify(await $.tool.call({ tool: 'mcp__magpie-sim__simulate', position: CGP, picture: true } as never))
+  expect(result).toContain('1. J2 RETAINS: 69 pts, win 76.44%')
+  const magpie = runs.find(run => run.argv[0]?.endsWith('magpie.exe'))
+  expect(magpie?.argv[0]).toBe('C:\\Users\\test\\AppData\\Local\\MAGPIE/bin/magpie.exe')
+  expect(magpie?.cwd).toBe('C:\\Users\\test\\AppData\\Local\\MAGPIE')
+  expect(magpie?.argv.join(' ')).toContain('-threads 6')
+  expect(runs.some(run => run.argv[0] === 'uname' || run.argv[0] === 'getconf' || run.argv[0] === 'sh')).toBe(false)
+  // The picture's base64 decoded by certutil, from the file $.fs wrote.
+  const decode = runs.find(run => run.argv[0] === 'certutil')
+  expect(decode?.argv.slice(0, 3)).toEqual(['certutil', '-f', '-decode'])
+  expect(decode?.argv[3]).toMatch(/^C:\\Temp\\magpie-sim\\CGP-\d+\.raw\.png\.b64$/)
+  expect(result).toMatch(/C:\\\\Temp\/magpie-sim\/CGP-\d+\.raw\.png/)
+})
 
 const XT_GAME = 'https://www.cross-tables.com/annotated/selfgcg/621/anno62161.gcg'
 
@@ -752,6 +787,7 @@ test('a PNG: signature, header, and every row, compressed', () => {
 function fakePictures(on: On) {
   const prompts: string[] = []
   on('fs.read', (_$, e) => (e.as === 'bytes' ? { value: { base64: fixtureFont().toBase64() } } : undefined) as never)
+  on('fs.write', () => ({ value: undefined }) as never)
   on('prompt.submit', (_$, e) => {
     prompts.push(e.text)
     return { drop: 'the test keeps it' } as never
@@ -759,16 +795,18 @@ function fakePictures(on: On) {
   return prompts
 }
 
-const PICTURE_FILE = /\/home\/test\/magpie-sim\/[A-Za-z0-9-]+-\d+\.png/
+// A Mac's squeezed by sips; elsewhere as written.
+const PICTURE_FILE = /\/tmp\/test\/magpie-sim\/[A-Za-z0-9-]+-\d+(?:\.raw)?\.png/
+const MAC = { env: { HOME: '/home/test', TMPDIR: '/tmp/test/' }, uname: 'Darwin arm64' }
 
 test('the simulate tool draws a picture and tells Claude to send it', async ($, on) => {
-  const runs = fakeHost(on)
+  const runs = fakeHost(on, SCAN_ENDING, [], '', MAC)
   fakePictures(on)
   const result = JSON.stringify(await $.tool.call({ tool: 'mcp__magpie-sim__simulate', position: CGP, picture: true } as never))
   expect(result).toContain('Send the person this picture with SendUserFile (display \\"render\\"')
   expect(result).toMatch(PICTURE_FILE)
   const decode = runs.find(run => run.argv[0] === 'sh')
-  expect(decode?.argv.slice(-2)[0]).toBe('/home/test/magpie-sim')
+  expect(decode?.argv.slice(-2)[0]).toBe('/tmp/test/magpie-sim')
   expect(decode?.stdin?.startsWith(encodePng(1, 1, new Uint8Array(4)).toBase64().slice(0, 8))).toBe(true)
   expect(runs.some(run => run.argv[0] === 'sips')).toBe(true)
 })
@@ -939,10 +977,9 @@ test("a play intent's moves, read from the interpreter", () => {
 test('/magpie plays on: each move found on the board, then the new rack simmed', async ($, on) => {
   const runs: { argv: readonly string[]; stdin?: string }[] = []
   const shownRack = 'AEINRST'
+  mock.env(on, LINUX.env)
   const answer = (argv: readonly string[], stdin = '') =>
-    argv[0] === 'printenv'
-      ? '/home/test\n'
-      : argv[0] === 'getconf'
+    argv[0] === 'getconf'
         ? '12\n'
         : stdin.includes(`rack ${shownRack}\ngenerate`)
           ? GENERATED_INERTIAS
@@ -1061,15 +1098,14 @@ test('which tile was the blank: both JAZZes fit, the one named alone', () => {
 function playHost(on: On, replies: string[], generated: Record<string, string>) {
   const runs: { argv: readonly string[]; stdin?: string }[] = []
   const prompts: string[] = []
+  mock.env(on, LINUX.env)
   on('process.run', (_$, e) => {
     runs.push({ argv: e.argv, stdin: e.init?.stdin })
     const stdin = e.init?.stdin ?? ''
     const rack = Object.keys(generated).find(key => stdin.includes(`rack ${key}\ngenerate`))
     const refused = /rack (ZZ\S*)\n$/.exec(stdin)
     const value =
-      e.argv[0] === 'printenv'
-        ? { stdout: '/home/test\n', stderr: '' }
-        : e.argv[0] === 'getconf'
+      e.argv[0] === 'getconf'
           ? { stdout: '12\n', stderr: '' }
           : refused !== null
             ? { stdout: GENERATED_JAZZ.split('\n1:')[0] ?? '', stderr: `(error 29) rack '${refused[1]}' is not available in the bag\n` }
@@ -1142,11 +1178,12 @@ const streamTable = (iterations: number, status: string, winPct: string) =>
 test('a sim streams into the pane, a table at a time, and keeps the last', async ($, on) => {
   const runs: { argv: readonly string[]; stdin?: string }[] = []
   const seen: (string | undefined)[] = []
+  mock.env(on, LINUX.env)
   // The pane, mounted before the sim runs: the stream's stub reads it.
   let ui: { find: (query: { type: 'Text'; text: RegExp }) => Promise<{ text?: string } | undefined> } | undefined
   on('process.run', (_$, e) => {
     runs.push({ argv: e.argv, stdin: e.init?.stdin })
-    const stdout = e.argv[0] === 'printenv' ? '/home/test\n' : e.argv[0] === 'getconf' ? '12\n' : ''
+    const stdout = e.argv[0] === 'getconf' ? '12\n' : ''
     return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } as never
   })
   // Between the tables, what the pane's summary says.

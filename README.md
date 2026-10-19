@@ -45,7 +45,7 @@ Say what to sim after `/magpie` in your own words. A model (Haiku) reads them in
 shows and which lexicons MAGPIE has; the rest is MAGPIE's:
 
 ```
-/magpie ADOPQRR                          an opening rack (CSW24 unless you name a lexicon)
+/magpie ADOPQRR                          an opening rack (in your lexicon unless you name another)
 /magpie opening rack rucksex nwl         NWL23, the newest NWL installed
 /magpie AEINRST after 8g vav             a rack after the moves before it (all lowercase is plain tiles; VaV has a blank)
 /magpie 15/15/.../15 AEINRST/ 0/0 0 lex CSW24;    a CGP
@@ -83,10 +83,18 @@ The table fills in while a sim runs, its numbers and order updating about twice 
 empty (seven or fewer tiles unseen) MAGPIE solves the endgame instead, and the table shows its 50 best first moves: Result
 the final spread (`W+20`, `L-10`, `T=0`), Net what the line nets, Then the rest of the line.
 
-- Needs MAGPIE installed in `~/magpie` (`bin/magpie` and `data/`), or wherever `magpieDir` says
-  (`claude plugin configure magpie-sim@olaugh-mods`; empty runs the `magpie` on PATH). From a MAGPIE checkout, after
-  `make release`: `mkdir -p ~/magpie/bin && cp bin/magpie ~/magpie/bin/ && cp -cR data ~/magpie/` (`-c` clones on
-  APFS, so the 5 GB of data costs no space until it changes).
+- Installs MAGPIE itself. Installing the mod asks the language you play in (English, Français, Deutsch, Nederlands,
+  Català, Polski) and your lexicon, the one a position is simmed in when it names none. The first session without
+  MAGPIE opens a setup pane with the same choices and an Install button, which gets MAGPIE 0.1.3 (on Windows the
+  published `.exe`, its SHA-256 checked; on macOS and Linux, where none is published yet, built from its source in
+  about a minute, which needs Apple's command-line tools or make and a C compiler), then has MAGPIE fetch its data
+  (about 195 MB, every language) and build your lexicon's word map. About a minute on a Mac, all told. `/magpie setup`
+  opens the pane again, to change the language or lexicon; until MAGPIE is installed, `/magpie` and the `simulate` tool
+  open it too.
+- MAGPIE lives in `~/.magpie` (`bin/magpie` and `data/`; `%LOCALAPPDATA%\MAGPIE` on Windows, where MAGPIE itself looks),
+  or wherever `magpieDir` says (`claude plugin configure magpie-sim@olaugh-mods`). To use a MAGPIE checkout's own
+  build instead, after `make release`: `mkdir -p ~/magpie/bin && cp bin/magpie ~/magpie/bin/ && cp -cR data ~/magpie/`
+  (`-c` clones on APFS, so the 5 GB of data costs no space until it changes), and set `magpieDir` to `~/magpie`.
 - Terminal: the board is an image, drawn by kitty graphics (kitty, Ghostty). Desktop and VS Code get SVG.
 - Phone: the Claude app following a session over Remote Control draws no pane, so a `/magpie` sent from it gets a
   picture instead: a PNG of the board and the top 10 plays with their leaves, which the mod draws once the sim finishes and asks

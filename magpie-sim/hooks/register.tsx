@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
 import type { SortKey } from '../types'
 import { cardPicture } from './card'
@@ -28,6 +28,8 @@ import {
   type Tiles,
   type GeneratedPlay,
   DEFAULT_LEXICON,
+  preferredLexicon,
+  setPreferredLexicon,
   describePosition,
   gcgPositions,
   interpreterPrompt,
@@ -54,6 +56,21 @@ import {
   type SimRequest,
 } from './magpie'
 import { encodePng } from './png'
+import {
+  defaultMagpieDir,
+  executableIn,
+  firstLexicon,
+  homeOf,
+  hostOf,
+  installMagpie,
+  isPublished,
+  LANGUAGES,
+  languageOf,
+  MAGPIE_VERSION,
+  windowsPath,
+  type Host,
+  type SetupProgress,
+} from './setup'
 import { describePlay, latestTable, parseBoard, parseSim, playName, playTiles, resultText, type Play, type Sim } from './sim'
 import { boardSvg } from './svg'
 import { SELECTED_ROW } from './theme'
@@ -61,8 +78,18 @@ import { parseFont, type Font } from './truetype'
 
 const PLUGIN = 'magpie-sim'
 const PANE = 'magpie-results'
-// Where MAGPIE is installed unless the magpieDir option says otherwise.
-const DEFAULT_MAGPIE_DIR = '~/magpie'
+// The magpieDir option's default: the folder the mod installs MAGPIE in
+// (setup.ts, defaultMagpieDir).
+const DEFAULT_MAGPIE_DIR = ''
+// The setup pane, which installs MAGPIE and picks the language and lexicon.
+const SETUP_PANE = 'magpie-setup'
+const SETUP_COLUMNS = 100
+const SETUP_ROWS = 24
+// How long after the session starts the setup pane opens, MAGPIE missing.
+const SETUP_DELAY_MS = 1000
+// The store's key for the person's "not now", which keeps the pane from
+// opening by itself again.
+const SETUP_DECLINED = 'setupDeclined'
 // The model that reads what the person typed after /magpie: quick, and
 // a short JSON reply is all it writes.
 const INTERPRETER_MODEL = 'haiku'
@@ -111,6 +138,9 @@ const simText = atom({ plugin: 'magpie-sim', key: 'simText' } as const, '')
 const running = atom({ plugin: 'magpie-sim', key: 'running' } as const, '')
 const runError = atom({ plugin: 'magpie-sim', key: 'runError' } as const, '')
 const current = atom({ plugin: 'magpie-sim', key: 'current' } as const, '')
+const setup = atom({ plugin: 'magpie-sim', key: 'setup' } as const, '')
+const setupLanguage = atom({ plugin: 'magpie-sim', key: 'setupLanguage' } as const, '')
+const setupLexicon = atom({ plugin: 'magpie-sim', key: 'setupLexicon' } as const, '')
 
 // How many plays the table showed when last drawn, and how many it has, so
 // the wheel scrolls no further than its end. The drawing clamps it again.
@@ -196,23 +226,33 @@ export async function loadSim($: EngineInterface): Promise<Sim> {
 
 let threadCount: Promise<number> | null = null
 
-// All the cores but two, for the sim's threads.
+// All the cores but two, for the sim's threads: Windows names its count,
+// getconf counts them elsewhere.
 function threads($: EngineInterface): Promise<number> {
-  threadCount ??= $.process
-    .run(['getconf', '_NPROCESSORS_ONLN'])
-    .then(({ stdout }) => Math.max(1, (Number.parseInt(stdout, 10) || 6) - 2))
-    .catch(() => 4)
+  threadCount ??= (async () => {
+    const named = await $.env.get('NUMBER_OF_PROCESSORS')
+    const cores = named ?? (await $.process.run(['getconf', '_NPROCESSORS_ONLN'])).stdout
+    return Math.max(1, (Number.parseInt(cores, 10) || 6) - 2)
+  })().catch(() => 4)
   return threadCount
 }
 
 let home: Promise<string> | null = null
 
 async function expandHome($: EngineInterface, path: string): Promise<string> {
-  if (path !== '~' && !path.startsWith('~/')) {
+  if (path !== '~' && !/^~[\\/]/.test(path)) {
     return path
   }
-  home ??= $.process.run(['printenv', 'HOME']).then(({ stdout }) => stdout.trim())
+  home ??= homeOf($)
   return (await home) + path.slice(1)
+}
+
+let host: Promise<Host> | null = null
+
+// The computer the session runs on, read once.
+function hostNow($: EngineInterface): Promise<Host> {
+  host ??= hostOf($)
+  return host
 }
 
 // An absolute path, `~` expanded and a relative one taken from the session's
@@ -229,18 +269,16 @@ function gcgLexicon(text: string): string | undefined {
 }
 
 // The MAGPIE install that runs the sims, holding bin/magpie and data/: the
-// magpieDir option (~/magpie unless set), read as the module loads. Empty
-// runs the magpie on PATH, whose data directory is its own business.
+// magpieDir option, read as the module loads. Empty is the folder the mod
+// installs MAGPIE in (setup.ts, defaultMagpieDir).
 let magpieDir = ''
 
 type Magpie = { binary: string; cwd?: string }
 
 async function findMagpie($: EngineInterface): Promise<Magpie> {
-  if (magpieDir === '') {
-    return { binary: 'magpie' }
-  }
-  const dir = await expandHome($, magpieDir)
-  return { binary: `${dir}/bin/magpie`, cwd: dir }
+  const machine = await hostNow($)
+  const dir = magpieDir === '' ? await defaultMagpieDir($, machine) : await expandHome($, magpieDir)
+  return { binary: executableIn(dir, machine), cwd: dir }
 }
 
 // Whichever of the RIT and WIT the lexicon has built. A lexicon or data
@@ -290,13 +328,15 @@ async function resolvePosition($: EngineInterface, request: SimRequest): Promise
     return { resolved: { kind: 'gcg' as const, source: path }, lexicon }
   }
   if (position.kind === 'url') {
-    const fetched = await $.process.run(['curl', '-fsSL', '--max-time', '60', position.url], { timeoutMs: 70_000 })
-    if (fetched.exitCode !== 0) {
-      throw new Error(`could not fetch ${position.url}: ${fetched.stderr.trim()}`)
+    const fetched = await $.http.fetch(position.url).catch((error: unknown) => {
+      throw new Error(`could not fetch ${position.url}: ${error instanceof Error ? error.message : String(error)}`)
+    })
+    if (!fetched.ok) {
+      throw new Error(`could not fetch ${position.url}: HTTP ${fetched.status}`)
     }
-    return sniffPosition(fetched.stdout) === 'cgp'
-      ? { resolved: { kind: 'cgp' as const, cgp: fetched.stdout.trim() }, lexicon }
-      : { resolved: { kind: 'gcg' as const, source: position.url }, lexicon: lexicon ?? gcgLexicon(fetched.stdout) }
+    return sniffPosition(fetched.text) === 'cgp'
+      ? { resolved: { kind: 'cgp' as const, cgp: fetched.text.trim() }, lexicon }
+      : { resolved: { kind: 'gcg' as const, source: position.url }, lexicon: lexicon ?? gcgLexicon(fetched.text) }
   }
   const path = await absolutePath($, position.path)
   const text = await $.fs.read(path)
@@ -359,11 +399,15 @@ const couldNotRun = (where: Magpie, error: unknown) =>
     `could not run ${where.binary} (${error instanceof Error ? error.message : String(error)}); install MAGPIE there, or set the mod's MAGPIE directory with \`claude plugin configure magpie-sim@olaugh-mods\``,
   )
 
+// MAGPIE's lines as it printed them, a Windows one's CRLFs as LFs.
+const lfLines = (text: string) => text.replaceAll('\r\n', '\n')
+
 async function execute($: EngineInterface, where: Magpie, label: string, run: MagpieRun) {
   note(`running ${label}: ${where.binary} ${run.args.join(' ')} <<< ${run.stdin.trim().split('\n').slice(0, 3).join('; ')}`)
   let result
   try {
-    result = await $.process.run([where.binary, ...run.args], { cwd: where.cwd, stdin: run.stdin, timeoutMs: RUN_TIMEOUT_MS })
+    const ran = await $.process.run([where.binary, ...run.args], { cwd: where.cwd, stdin: run.stdin, timeoutMs: RUN_TIMEOUT_MS })
+    result = { ...ran, stdout: lfLines(ran.stdout), stderr: lfLines(ran.stderr) }
   } catch (error) {
     throw couldNotRun(where, error)
   }
@@ -389,9 +433,10 @@ async function executeStreaming(
     // Leaving the loop ends the child.
     for await (const { stream, text } of $.process.spawn({ argv: [where.binary, ...run.args], cwd: where.cwd, input: run.stdin })) {
       if (stream === 'stderr') {
-        stderr += text
+        stderr = lfLines(stderr + text)
       } else {
-        stdout += text
+        // Whole: a CRLF may come in two pieces.
+        stdout = lfLines(stdout + text)
         const table = latestTable(stdout)
         if (table !== undefined && table.count > handed) {
           handed = table.count
@@ -431,7 +476,7 @@ async function planSim($: EngineInterface, request: SimRequest): Promise<{ plan:
     // unread here).
     let scan = await execute($, where, label, scanRun(resolved.source, lexicon))
     if (lexicon === undefined && /without a specified lexicon/.test(scan.said)) {
-      lexicon = DEFAULT_LEXICON
+      lexicon = preferredLexicon()
       scan = await execute($, where, label, scanRun(resolved.source, lexicon))
     }
     const positions = gcgPositions(scan.result.stdout)
@@ -906,7 +951,128 @@ async function currentTitle($: EngineInterface): Promise<string> {
   }
 }
 
-const SIM_SHAPE = `${SIM_PLAYS} plays × ${ITERATIONS_PER_PLAY.toLocaleString('en-US')} iterations, ${SIM_PLIES} plies`
+// The language the person plays in, the mod's option; their lexicon is
+// magpie.ts's preferredLexicon.
+let language = 'English'
+
+const NOT_INSTALLED = 'MAGPIE, which runs the sims, is not installed yet'
+
+// Whether MAGPIE and its data are where the mod runs them.
+async function isInstalled($: EngineInterface): Promise<boolean> {
+  const where = await findMagpie($)
+  return (await $.fs.exists(where.binary)) && (where.cwd === undefined || (await $.fs.exists(`${where.cwd}/data/lexica`)))
+}
+
+async function openSetup($: EngineInterface, focus: boolean): Promise<string> {
+  const opened = await $.ui.open({
+    id: SETUP_PANE,
+    title: 'MAGPIE setup',
+    focus: focus ? true : undefined,
+    rows: SETUP_ROWS,
+    columns: SETUP_COLUMNS,
+  })
+  return opened.isPlaced ? 'Opened the MAGPIE setup pane' : `The setup pane waits undrawn: ${opened.reason}`
+}
+
+// Opens the setup pane by itself at the session's start while MAGPIE is
+// missing, unless the person said not now.
+async function offerSetup($: EngineInterface) {
+  if ((await isInstalled($)) || (await $.store.get(SETUP_DECLINED)) === true) {
+    return
+  }
+  note(`MAGPIE is missing: ${await openSetup($, false)}`)
+}
+
+// The language and lexicon the setup pane shows: its picks, else the options.
+async function setupChoices($: EngineInterface): Promise<{ language: string; lexicon: string }> {
+  return {
+    language: (await read($, setupLanguage)) || language,
+    lexicon: (await read($, setupLexicon)) || preferredLexicon(),
+  }
+}
+
+let setupRun: Promise<boolean> | null = null
+
+async function pickLanguage($: EngineInterface, name: string) {
+  if (setupRun !== null) {
+    return
+  }
+  const { lexicon } = await setupChoices($)
+  await update($, setupLanguage, () => name)
+  if (languageOf(lexicon) !== name) {
+    await update($, setupLexicon, () => firstLexicon(name))
+  }
+}
+
+async function pickLexicon($: EngineInterface, name: string) {
+  if (setupRun === null) {
+    await update($, setupLexicon, () => name)
+  }
+}
+
+// Installs what is missing for the choices, then keeps them as the mod's
+// options, as /config shows them.
+async function startSetup($: EngineInterface) {
+  if (setupRun !== null) {
+    return
+  }
+  const choices = await setupChoices($)
+  const where = await findMagpie($)
+  const plan = { host: await hostNow($), dir: where.cwd ?? '', lexicon: choices.lexicon, threads: await threads($) }
+  let progress: SetupProgress | undefined
+  setupRun = installMagpie($, plan, async shown => {
+    progress = shown
+    await update($, setup, () => JSON.stringify(shown))
+  })
+  const isDone = await setupRun.finally(() => {
+    setupRun = null
+  })
+  note(`setup ${isDone ? 'done' : `stopped: ${progress?.problem ?? ''}`}`)
+  if (!isDone || progress === undefined) {
+    return
+  }
+  lexicaList = null
+  await $.store.delete(SETUP_DECLINED)
+  const saved = await saveChoices($, choices)
+  await update($, setup, () => JSON.stringify({ ...progress, saved }))
+}
+
+// The choices as the mod's options, which a change reloads it with; meanwhile
+// this session uses them. Says what could not be saved.
+async function saveChoices($: EngineInterface, choices: { language: string; lexicon: string }): Promise<string> {
+  const unsaved: string[] = []
+  for (const [field, value, was] of [
+    ['language', choices.language, language],
+    ['lexicon', choices.lexicon, preferredLexicon()],
+  ] as const) {
+    if (value === was) {
+      continue
+    }
+    const result = await $.config.set({ key: `${PLUGIN}.${field}`, value }).catch((error: unknown) => ({ deny: String(error) }))
+    if ('deny' in result && result.deny !== undefined) {
+      note(`could not save the ${field}: ${result.deny}`)
+      unsaved.push(field)
+    }
+  }
+  language = choices.language
+  setPreferredLexicon(choices.lexicon)
+  return unsaved.length === 0
+    ? ''
+    : `The ${unsaved.join(' and ')} hold for this session; to keep them, set them in /config (${PLUGIN}).`
+}
+
+async function declineSetup($: EngineInterface) {
+  await $.store.set(SETUP_DECLINED, true)
+  await $.ui.close({ id: SETUP_PANE })
+}
+
+// Apple's installer of its command-line tools, which building on a Mac needs.
+async function getAppleTools($: EngineInterface) {
+  const started = await $.process.run(['xcode-select', '--install']).catch(() => undefined)
+  note(`xcode-select --install: ${started === undefined ? 'did not start' : `exit ${started.exitCode}`}`)
+}
+
+const SIM_SHAPE = `${SIM_PLAYS} plays ×${ITERATIONS_PER_PLAY.toLocaleString('en-US')} iterations, ${SIM_PLIES} plies`
 
 // Where the latest prompt came from: `bridge` for the phone (or the web) over
 // Remote Control, where no pane draws, so a sim answers with a picture.
@@ -916,9 +1082,10 @@ let pictureDirectory: Promise<string> | null = null
 
 // Pictures go in the temporary directory, `magpie-sim` in it.
 function pictureFolder($: EngineInterface): Promise<string> {
-  pictureDirectory ??= $.process
-    .run(['printenv', 'TMPDIR'])
-    .then(({ stdout }) => `${stdout.trim().replace(/\/$/, '') || '/tmp'}/magpie-sim`)
+  pictureDirectory ??= (async () => {
+    const temporary = (await $.env.get('TMPDIR')) ?? (await $.env.get('TEMP')) ?? '/tmp'
+    return `${temporary.replace(/[\\/]$/, '')}/magpie-sim`
+  })()
   return pictureDirectory
 }
 
@@ -940,15 +1107,25 @@ async function makePicture($: EngineInterface, given?: Sim): Promise<{ file: str
   const name = `${(sim.label || sim.rack).replace(/[^A-Za-z0-9]+/g, '-').slice(0, 60)}-${Date.now()}`
   const raw = `${directory}/${name}.raw.png`
   const path = `${directory}/${name}.png`
-  // The file is binary and $.fs writes text: its base64 decoded on the way.
-  const wrote = await $.process.run(['sh', '-c', 'mkdir -p "$1" && base64 --decode > "$2"', 'magpie-sim', directory, raw], {
-    stdin: encodePng(picture.width, picture.height, picture.pixels).toBase64(),
-  })
-  if (wrote.exitCode !== 0) {
-    throw new Error(`could not write the picture: ${wrote.stderr.trim()}`)
+  // The file is binary and $.fs writes text: its base64 decoded on the way,
+  // on Windows by certutil from a file $.fs writes (folders and all).
+  const base64 = encodePng(picture.width, picture.height, picture.pixels).toBase64()
+  const machine = await hostNow($)
+  let wrote
+  if (machine.os === 'windows') {
+    await $.fs.write(`${raw}.b64`, base64)
+    wrote = await $.process.run(['certutil', '-f', '-decode', windowsPath(`${raw}.b64`), windowsPath(raw)])
+  } else {
+    wrote = await $.process.run(['sh', '-c', 'mkdir -p "$1" && base64 --decode > "$2"', 'magpie-sim', directory, raw], {
+      stdin: base64,
+    })
   }
-  // Stored uncompressed (no deflate here); sips writes it compressed.
-  const squeezed = await $.process.run(['sips', '-s', 'format', 'png', raw, '--out', path]).catch(() => undefined)
+  if (wrote.exitCode !== 0) {
+    throw new Error(`could not write the picture: ${(wrote.stderr || wrote.stdout).trim()}`)
+  }
+  // On a Mac, sips writes it smaller still.
+  const squeezed =
+    machine.os === 'macos' ? await $.process.run(['sips', '-s', 'format', 'png', raw, '--out', path]).catch(() => undefined) : undefined
   const file = squeezed?.exitCode === 0 ? path : raw
   note(`drew ${file}`)
   return { file, caption: `${sim.label || sim.rack}: ${sim.kind === 'endgame' ? 'the endgame solved' : 'the top plays'}` }
@@ -1053,7 +1230,7 @@ function describeMove(move: MoveDescription): string {
 // The set of tiles the lexicon's games use, from MAGPIE's own data; none
 // known for the magpie on PATH, or a set of many-letter tiles.
 async function tileSet($: EngineInterface, where: Magpie, lexicon: string | undefined): Promise<Tiles | undefined> {
-  const name = distributionName(lexicon ?? DEFAULT_LEXICON)
+  const name = distributionName(lexicon ?? preferredLexicon())
   if (name === undefined || where.cwd === undefined) {
     return undefined
   }
@@ -1283,11 +1460,15 @@ async function resolvePlay(
 async function requestFor(
   $: EngineInterface,
   intent: Intent,
-): Promise<{ request: SimRequest; message?: string } | { answer: string; reopen?: true; picture?: true; followUp?: true }> {
+): Promise<
+  { request: SimRequest; message?: string } | { answer: string; reopen?: true; picture?: true; followUp?: true; setup?: true }
+> {
   const shown = await readCurrent($)
   switch (intent.action) {
     case 'unclear':
       return { answer: intent.question, followUp: true }
+    case 'setup':
+      return { answer: 'Pick the language and lexicon you play in there.', setup: true }
     case 'reopen':
       return { answer: 'Opened the MAGPIE sim pane.', reopen: true }
     case 'play':
@@ -1348,7 +1529,9 @@ function askWhich(request: SimRequest, candidates: readonly GcgPosition[]): stri
 }
 
 export const register: Register = (on, options) => {
-  magpieDir = typeof options.magpieDir === 'string' ? options.magpieDir.trim().replace(/\/+$/, '') : DEFAULT_MAGPIE_DIR
+  magpieDir = typeof options.magpieDir === 'string' ? options.magpieDir.trim().replace(/[\\/]+$/, '') : DEFAULT_MAGPIE_DIR
+  language = typeof options.language === 'string' && options.language !== '' ? options.language : 'English'
+  setPreferredLexicon(typeof options.lexicon === 'string' && options.lexicon !== '' ? options.lexicon.toUpperCase() : DEFAULT_LEXICON)
 
   on('session.start', async ($, e, next) => {
     // Each registration on its own: a refused one (a name another plugin
@@ -1416,6 +1599,10 @@ export const register: Register = (on, options) => {
         },
       })
       .catch((error: unknown) => note(`the show tool refused: ${String(error)}`))
+    // Once the session is up, so the pane has a surface to open on.
+    $.clock.after(SETUP_DELAY_MS, () => {
+      offerSetup($).catch((error: unknown) => note(`could not offer setup: ${String(error)}`))
+    })
     return next(e)
   })
 
@@ -1441,6 +1628,12 @@ export const register: Register = (on, options) => {
         ].join('\n'),
       }
     }
+    if (args === 'setup') {
+      return { text: `${await openSetup($, true)}.` }
+    }
+    if (!(await isInstalled($))) {
+      return { text: `${NOT_INSTALLED}. ${await openSetup($, true)}: press Install there.` }
+    }
     // The phone (or the web) over Remote Control draws no pane: a picture is
     // what it can show.
     const fromPhone = e.origin?.kind === 'bridge'
@@ -1465,6 +1658,9 @@ export const register: Register = (on, options) => {
         }
         if (found.reopen === true) {
           await openPane($, await currentTitle($), true)
+        }
+        if (found.setup === true) {
+          return { text: `${await openSetup($, true)}. ${found.answer}` }
         }
         if (found.picture === true || (fromPhone && found.reopen === true)) {
           await sendPicture($)
@@ -1524,6 +1720,11 @@ export const register: Register = (on, options) => {
     const input = e as Record<string, unknown>
     let request: SimRequest
     let planned: Awaited<ReturnType<typeof planSim>>
+    if (!(await isInstalled($))) {
+      return {
+        result: `Not run: ${NOT_INSTALLED}. ${await openSetup($, false)}; ask the person to press Install there (it gets MAGPIE ${MAGPIE_VERSION} and about 195 MB of word lists), then call again.`,
+      }
+    }
     try {
       // The caller is a model already: its fields are the intent.
       const found = await requestFor($, parseIntent(JSON.stringify({ ...input, action: 'sim' })))
@@ -1581,7 +1782,7 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: 'mcp__magpie-sim__show' }, async ($, e) => {
     const file = (e as { file?: unknown }).file
     if (typeof file === 'string' && file !== '') {
-      if (!file.startsWith('/')) {
+      if (!/^(?:\/|[A-Za-z]:[\\/])/.test(file)) {
         return { deny: `${PLUGIN}: give the results file as an absolute path, not ${file}` }
       }
       await update($, simFile, () => file)
@@ -1798,5 +1999,100 @@ export const register: Register = (on, options) => {
         </Box>
       )
     }
+  })
+
+  // The setup pane: the language and lexicon as buttons, what installing
+  // does, then each step as it goes.
+  on('ui.render', { component: 'Pane', requestId: SETUP_PANE }, async ($, e) => {
+    const { Box, Button, Text } = $.ui.resolve(e)
+    const json = await read($, setup)
+    const progress = json === '' ? undefined : (JSON.parse(json) as SetupProgress)
+    const choices = await setupChoices($)
+    const where = await findMagpie($)
+    const machine = await hostNow($)
+    const installed = await isInstalled($)
+    const isRunning = progress?.isRunning === true
+
+    const chip = (key: string, label: string, isChosen: boolean, onPress: () => Promise<void>) => (
+      <Button key={key} plain onPress={onPress}>
+        {isChosen ? (
+          <Text backgroundColor={SELECTED_BACKGROUND} color={SELECTED_TEXT}>{` ${label} `}</Text>
+        ) : (
+          <Text>{` ${label} `}</Text>
+        )}
+      </Button>
+    )
+    const lexica = LANGUAGES.find(candidate => candidate.name === choices.language)?.lexica ?? [choices.lexicon]
+    const row = (key: string, title: string, chips: RenderChildren) => (
+      <Box key={key} flexDirection="row" flexWrap="wrap">
+        <Text bold>{title.padEnd(10)}</Text>
+        {chips}
+      </Box>
+    )
+
+    const getting = isPublished(machine) ? `downloads MAGPIE ${MAGPIE_VERSION}` : `builds MAGPIE ${MAGPIE_VERSION} from its source (about a minute)`
+    const intro = installed
+      ? `MAGPIE is installed in ${where.cwd}. Pick the language and lexicon you play in, then press Save.`
+      : `MAGPIE runs the sims, and it is not installed yet. Pick the language and lexicon you play in, then press Install: it ${getting}, then its word lists (about 195 MB), then builds the word map of your lexicon.`
+    const icon = { waiting: '·', running: '…', done: '✓', failed: '✗' } as const
+    const colour = { waiting: 'gray', running: 'yellow', done: 'green', failed: 'red' } as const
+
+    return (
+      <Box flexDirection="column" rowGap={1}>
+        <Text wrap="wrap">{intro}</Text>
+        <Box flexDirection="column">
+          {row(
+            'languages',
+            'Language',
+            LANGUAGES.map(({ name }) => chip(`language-${name}`, name, name === choices.language, () => pickLanguage($, name))),
+          )}
+          {row(
+            'lexica',
+            'Lexicon',
+            lexica.map(name => chip(`lexicon-${name}`, name, name === choices.lexicon, () => pickLexicon($, name))),
+          )}
+          <Text dimColor wrap="truncate-end">{`${'Folder'.padEnd(10)}${where.cwd ?? ''}  (change it in /config, ${PLUGIN})`}</Text>
+        </Box>
+        {isRunning ? null : (
+          <Box flexDirection="row" columnGap={2}>
+            <Button key="install" onPress={() => void startSetup($)}>
+              {installed ? 'Save' : 'Install'}
+            </Button>
+            {installed ? null : (
+              <Button key="decline" onPress={() => declineSetup($)}>
+                Not now
+              </Button>
+            )}
+          </Box>
+        )}
+        {progress === undefined ? null : (
+          <Box flexDirection="column">
+            {progress.steps.map(step => (
+              <Text key={`step-${step.key}`} wrap="truncate-end">
+                <Text color={colour[step.state]}>{`${icon[step.state]} `}</Text>
+                {step.label}
+                <Text dimColor>{step.detail === '' ? '' : `  ${step.detail}`}</Text>
+              </Text>
+            ))}
+            {progress.problem === '' ? null : (
+              <Text color="red" wrap="wrap">
+                {progress.problem}
+              </Text>
+            )}
+            {progress.remedy === 'tools' ? (
+              <Button key="tools" onPress={() => getAppleTools($)}>
+                Get the tools
+              </Button>
+            ) : null}
+            {progress.isDone ? (
+              <Text color="green" wrap="wrap">
+                {`MAGPIE is ready, in ${choices.lexicon}. Try /magpie AEINRST, or ask Claude to sim a position.`}
+              </Text>
+            ) : null}
+            {progress.saved === undefined || progress.saved === '' ? null : <Text wrap="wrap">{progress.saved}</Text>}
+          </Box>
+        )}
+      </Box>
+    )
   })
 }

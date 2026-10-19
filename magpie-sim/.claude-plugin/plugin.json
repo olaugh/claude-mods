@@ -1,15 +1,32 @@
 {
   "name": "magpie-sim",
-  "version": "0.4.1",
-  "description": "Sim a crossword position in MAGPIE and browse the results in a pane, with a board picture of each play: /magpie <rack | CGP | .cgp/.gcg path or URL>",
+  "version": "0.5.0",
+  "description": "Sim a crossword position in MAGPIE and browse the results in a pane, with a board picture of each play: /magpie <rack | CGP | .cgp/.gcg path or URL>. Installs MAGPIE itself on first use.",
   "author": { "name": "olaugh" },
   "types": "./types/index.d.ts",
   "userConfig": {
+    "language": {
+      "type": "string",
+      "title": "Language",
+      "description": "The language you play in.",
+      "default": "English",
+      "options": ["English", "Français", "Deutsch", "Nederlands", "Català", "Polski"]
+    },
+    "lexicon": {
+      "type": "string",
+      "title": "Lexicon",
+      "description": "The lexicon a position is simmed in when it names none.",
+      "default": "CSW24",
+      "options": [
+        "CSW24", "NWL23", "CSW21", "NWL20", "TWL14", "CSW15", "TWL06", "CSW12", "CSW07", "TWL98",
+        "OSWI", "OSW4", "OSW3", "OSW2", "OSW1", "FRA20", "RD29", "DSW25", "DISC2", "OSPS49"
+      ]
+    },
     "magpieDir": {
       "type": "string",
       "title": "MAGPIE directory",
-      "description": "Where MAGPIE is installed: a directory holding bin/magpie and data/. Empty runs the magpie on PATH, which finds its own data.",
-      "default": "~/magpie"
+      "description": "Where MAGPIE is installed: a directory holding bin/magpie and data/. Empty is the one the mod installs it in: ~/.magpie, or %LOCALAPPDATA%\\MAGPIE on Windows.",
+      "default": ""
     }
   }
 }

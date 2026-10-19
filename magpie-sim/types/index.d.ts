@@ -18,6 +18,13 @@ declare module 'claude-code' {
       runError: string
       /** What the pane shows, as JSON (register.tsx's Current); empty before a run. */
       current: string
+      /** How the install goes, as JSON (setup.ts's SetupProgress); empty
+       * before one starts. */
+      setup: string
+      /** The language and lexicon the setup pane picked; empty for the
+       * mod's options. */
+      setupLanguage: string
+      setupLexicon: string
     }
   }
 }

@@ -7,6 +7,18 @@
 import { BOARD_DIM, COLUMN_LETTERS, premiumAt } from './layout'
 
 export const DEFAULT_LEXICON = 'CSW24'
+// The lexicon for a position that names none: the person's own (the mod's
+// lexicon option), CSW24 until it is read.
+let preferred = DEFAULT_LEXICON
+
+export function setPreferredLexicon(lexicon: string) {
+  preferred = lexicon
+}
+
+export function preferredLexicon(): string {
+  return preferred
+}
+
 // 5,000 iterations for each of the top 50 plays, shared evenly.
 export const SIM_PLAYS = 50
 export const ITERATIONS_PER_PLAY = 5000
@@ -68,7 +80,7 @@ export type SimRequest = {
   label: string
   /** As the person gave the position, to repeat back to them. */
   source: string
-  /** Left out: CSW24, or what a CGP's `lex` or a GCG's `#lexicon` says. */
+  /** Left out: the person's own, or what a CGP's `lex` or a GCG's `#lexicon` says. */
   lexicon?: string
   /** For a GCG; left out, its latest position with a player to move. */
   at?: Selector
@@ -115,6 +127,8 @@ export type Intent =
   | { action: 'reopen' }
   /** A picture of what the pane shows, sent to the person (for a phone). */
   | { action: 'picture' }
+  /** The setup pane: MAGPIE installed, the language and lexicon chosen. */
+  | { action: 'setup' }
   | { action: 'unclear'; question: string }
 
 /** What the interpreter knows of the pane: the analysis it shows, if any,
@@ -183,12 +197,13 @@ The object is one of:
 - {"action":"lexicon","lexicon":"CSW24"} to analyze what the pane shows again in another lexicon, when the person names only a lexicon.
 - {"action":"reopen"} to show the pane again without a new analysis.
 - {"action":"picture"} to send a picture of what the pane shows ("send it to my phone", "picture", "image").
+- {"action":"setup"} to install MAGPIE again, or to change the language or lexicon the person plays in for good ("setup", "install", "I play in French").
 - {"action":"unclear","question":"..."} when you cannot tell what they mean; ask one short question.
 - {"action":"play","moves":[...],"rack":"..."} when the person tells what was played from the position the pane shows, as a game goes on: each move in order, then the rack they now hold.
   A move: {"word":"INERTIAS"} with whatever they said of it: "by" ("me" for the person, "opponent"), "square" (its first tile's square, 8H or H8 as above), "direction" ("across" or "down"), "score", "through" (tiles on the board it went through: [{"letter":"A","word":"INERTIAS"}], the word on the board each is in), "premium" ("TW", "DW", "TL" or "DL": "to the TWS" is TW). "leave": the tiles they kept ("keeping ion" is "ION"). A pass is {"pass":true}. The word is in capitals, the board's tiles in it included; when they say which tile was a blank, that letter alone in lowercase ("the second z was the blank": JAZz). Moves alternate: the person's own first move is from the rack they hold, often one of the top plays.
   "rack": the tiles they hold now, in capitals, ? for a blank; a ? after letters is the blank ("polish?" is ?HILOPS, not a question), and a rack is not a word to look up. Leave it out when they have not said.
 
-Words like "sim", "opening", "rack", "the", "turn", "where", "played" only say what the rest is. Words are case-insensitive except as "after" says.
+Words like "sim", "opening", "rack", "the", "turn", "where", "played" only say what the rest is. Words are case-insensitive except as "after" says. The person may write in any language: read "simule le tirage AEINRST" or "ich habe ÄRGER gelegt" as you would the English. A position with no lexicon named is in ${preferred}: leave "lexicon" out for it.
 
 Examples:
 "ADOPQRR" -> {"action":"sim","position":"ADOPQRR"}
@@ -242,6 +257,8 @@ export function parseIntent(reply: string): Intent {
       return { action: 'reopen' }
     case 'picture':
       return { action: 'picture' }
+    case 'setup':
+      return { action: 'setup' }
     case 'play': {
       const moves = Array.isArray(fields.moves) ? fields.moves.map(parseMove) : []
       const rack = text('rack')?.toUpperCase()
@@ -737,12 +754,12 @@ export function commitCommands(moves: readonly PlacedMove[]): string[] {
 }
 
 /** The lexicon a run of `position` uses: the one asked for, else a CGP's
- * own, else CSW24; a game's own, unread here, is undefined. */
+ * own, else the person's; a game's own, unread here, is undefined. */
 export function runLexicon(position: Resolved, lexicon: string | undefined): string | undefined {
   if (lexicon !== undefined || position.kind === 'gcg') {
     return lexicon
   }
-  return (position.kind === 'cgp' ? splitCgp(position.cgp).lexicon : undefined) ?? DEFAULT_LEXICON
+  return (position.kind === 'cgp' ? splitCgp(position.cgp).lexicon : undefined) ?? preferred
 }
 
 // The commands that reach a position, before what it is for: the board and
