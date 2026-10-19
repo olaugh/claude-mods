@@ -1,6 +1,6 @@
 {
   "name": "magpie-sim",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Sim a crossword position in MAGPIE and browse the results in a pane, with a board picture of each play: /magpie <rack | CGP | .cgp/.gcg path or URL>. Installs MAGPIE itself on first use.",
   "author": { "name": "olaugh" },
   "types": "./types/index.d.ts",

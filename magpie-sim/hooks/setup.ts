@@ -34,19 +34,26 @@ export function isPublished(host: Host): boolean {
   return EXECUTABLES[`${host.os}-${host.arch}`] !== undefined
 }
 
-/** The languages MAGPIE plays in, each by its own name, with its lexicons
- * (the ones MAGPIE's data holds), newest and most played first. */
-export const LANGUAGES: readonly { name: string; lexica: readonly string[] }[] = [
+/** The languages MAGPIE plays in, each by its own name and its English one,
+ * with its lexicons (the ones MAGPIE's data holds), newest and most played
+ * first. */
+export const LANGUAGES: readonly { name: string; english: string; lexica: readonly string[] }[] = [
   {
     name: 'English',
+    english: 'English',
     lexica: ['CSW24', 'NWL23', 'CSW21', 'NWL20', 'TWL14', 'CSW15', 'TWL06', 'CSW12', 'CSW07', 'TWL98', 'OSWI', 'OSW4', 'OSW3', 'OSW2', 'OSW1'],
   },
-  { name: 'Français', lexica: ['FRA20'] },
-  { name: 'Deutsch', lexica: ['RD29'] },
-  { name: 'Nederlands', lexica: ['DSW25'] },
-  { name: 'Català', lexica: ['DISC2'] },
-  { name: 'Polski', lexica: ['OSPS49'] },
+  { name: 'Français', english: 'French', lexica: ['FRA20'] },
+  { name: 'Deutsch', english: 'German', lexica: ['RD29'] },
+  { name: 'Nederlands', english: 'Dutch', lexica: ['DSW25'] },
+  { name: 'Català', english: 'Catalan', lexica: ['DISC2'] },
+  { name: 'Polski', english: 'Polish', lexica: ['OSPS49'] },
 ]
+
+/** A language's English name, English for one not listed. */
+export function englishNameOf(language: string): string {
+  return LANGUAGES.find(candidate => candidate.name === language)?.english ?? 'English'
+}
 
 /** The language a lexicon is in, English for one not listed. */
 export function languageOf(lexicon: string): string {

@@ -21,6 +21,7 @@ import {
   parseDistribution,
   parseGenerated,
   parseIntent,
+  parseScores,
   playSquares,
   positionLabel,
   rackLess,
@@ -340,6 +341,8 @@ function fakeHost(
   replies: string[] = [],
   endgame = '',
   machine: { env: Record<string, string>; uname: string; newline?: string } = LINUX,
+  // Each prompt the model is asked, its instructions' start then the prompt.
+  asked: string[] = [],
 ) {
   const runs: { argv: readonly string[]; stdin?: string; cwd?: string }[] = []
   mock.env(on, machine.env)
@@ -362,7 +365,8 @@ function fakeHost(
   on('fs.exists', () => ({ value: true }) as never)
   on('fs.list', () => ({ value: ['CSW24.kwg', 'CSW24.klv2', 'NWL23.kwg'].map(name => ({ name, kind: 'file', size: 1 })) }) as never)
   on('ui.open', () => ({ value: { isPlaced: true } }) as never)
-  on('model.complete', () => {
+  on('model.complete', (_$, e) => {
+    asked.push(`${String(e.system).slice(0, 200)} | ${String(e.prompt)}`)
     const text = replies.shift()
     const usage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
     return { value: text === undefined ? { isAnswered: false, reason: 'api-error', usage } : { isAnswered: true, text, usage } } as never
@@ -442,6 +446,16 @@ test('/magpie says so when the model does not answer', async ($, on) => {
   fakeHost(on)
   const { text } = await $.command.run({ command: 'magpie', args: 'rucksex' } as never)
   expect(text).toContain('the model reading it did not answer (api-error)')
+})
+
+test('/magpie answers in the language the person plays in', { options: { language: 'Deutsch' } }, async ($, on) => {
+  const prompts: string[] = []
+  fakeHost(on, SCAN_PHONY, ['{"action":"navigate","to":"next"}', 'Das Feld zeigt kein Spiel, durch das man ziehen könnte.'], '', LINUX, prompts)
+  const { text } = await $.command.run({ command: 'magpie', args: 'nächster Zug' } as never)
+  expect(text).toBe('Das Feld zeigt kein Spiel, durch das man ziehen könnte.')
+  // The model reads the words, then writes the English answer in German.
+  expect(prompts[1]).toMatch(/^You translate the replies of \/magpie.* into German\./)
+  expect(prompts[1]).toContain('| The pane shows no game to move through')
 })
 
 test('/magpie moves through the game the pane shows', async ($, on) => {
@@ -786,7 +800,7 @@ test('a PNG: signature, header, and every row, compressed', () => {
 // and the prompts the mod queues for Claude to send it.
 function fakePictures(on: On) {
   const prompts: string[] = []
-  on('fs.read', (_$, e) => (e.as === 'bytes' ? { value: { base64: fixtureFont().toBase64() } } : undefined) as never)
+  on('fs.read', (_$, e) => (e.as === 'bytes' ? { value: { base64: fixtureFont().toBase64() } } : { deny: 'no such file' }) as never)
   on('fs.write', () => ({ value: undefined }) as never)
   on('prompt.submit', (_$, e) => {
     prompts.push(e.text)
@@ -1057,7 +1071,11 @@ test('the tiles left, and a word or rack they cannot make', () => {
   expect(distributionName('XYZ')).toBeUndefined()
   const set = parseDistribution(ENGLISH_CSV)
   expect(set?.get('E')).toBe(12)
-  expect(parseDistribution('CH,ch,1,5,0\nA,a,9,1,1')).toBeUndefined()
+  // Catalan's tiles of several letters are one letter each (tiles.ts).
+  expect(parseDistribution('L·L,l·l,1,10,0\nNY,ny,1,10,0\nÇ,ç,1,10,0\nA,a,12,1,1')).toEqual(
+    new Map([['Ŀ', 1], ['Ñ', 1], ['Ç', 1], ['A', 12]]),
+  )
+  expect(parseScores('L·L,l·l,1,10,0\nA,a,12,1,1')).toEqual({ Ŀ: 10, A: 1 })
   const left = tilesLeft(set ?? new Map(), EMPTY)
   // JAZZ is the one Z and a blank; PIZZAZZ needs more than there are.
   expect(withBlanks('JAZZ', left)).toEqual({ rack: 'JAZ?' })
@@ -1114,7 +1132,7 @@ function playHost(on: On, replies: string[], generated: Record<string, string>) 
   })
   on('fs.exists', () => ({ value: true }) as never)
   on('fs.list', () => ({ value: [{ name: 'CSW24.kwg', kind: 'file', size: 1 }] }) as never)
-  on('fs.read', (_$, e) => (e.path.endsWith('/letterdistributions/english.csv') ? { value: ENGLISH_CSV } : { error: 'no such file' }) as never)
+  on('fs.read', (_$, e) => (e.path.endsWith('/letterdistributions/english.csv') ? { value: ENGLISH_CSV } : { deny: 'no such file' }) as never)
   on('ui.open', () => ({ value: { isPlaced: true } }) as never)
   on('model.complete', (_$, e) => {
     prompts.push(e.prompt)

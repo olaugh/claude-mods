@@ -27,6 +27,7 @@ import {
   TOP,
   type Rgb,
 } from './theme'
+import { tileLabel } from './tiles'
 import { inkBox, type Font, type InkBox } from './truetype'
 
 /** What a board is drawn onto. Glyphs are placed by the left edge of their
@@ -47,10 +48,24 @@ const LETTER_LIFT = Math.floor(SQUARE * 0.08)
 const SCORE_MARGIN_X = Math.floor(SQUARE * 0.12)
 const SCORE_MARGIN_Y = Math.floor(SQUARE * 0.16)
 const LABEL_SIZE = 10
+// A tile of several letters: the part of its width they may span, and the
+// pixels between them.
+const MANY_LETTERS_WIDTH = 0.7
+const LETTER_GAP = 1
 
 /** The ink box of `char` drawn at `size` pixels, y up from the baseline. */
 export function glyphInk(font: Font, char: string, size: number, isBold: boolean): InkBox | null {
   return inkBox(font.outline(char.codePointAt(0) ?? 0, isBold), size / font.unitsPerEm)
+}
+
+// What each tile scores in the set the pictures show: English's until the
+// mod reads the sim's own set (setTileScores).
+let tileScores: Readonly<Record<string, number>> = TILE_SCORES
+
+/** The scores of the set the pictures show from now on, by tile (a Catalan
+ * one of several letters packed into one, tiles.ts). */
+export function setTileScores(scores: Readonly<Record<string, number>>) {
+  tileScores = scores
 }
 
 /** `isLarge`: a tile without a score drawn small (a row of the table), its
@@ -64,15 +79,29 @@ export function tileColors(letter: string, bg: Rgb): { fg: Rgb; bg: Rgb } {
 
 export function drawTile(canvas: Canvas, font: Font, x: number, y: number, tile: Tile) {
   canvas.rect(x, y, SQUARE, SQUARE, tile.bg)
-  const size = tile.isLarge === true && !tile.hasScore ? LARGE_LETTER_SIZE : LETTER_SIZE
-  const ink = glyphInk(font, tile.letter, size, tile.isBold)
-  const score = TILE_SCORES[tile.letter] ?? 0
-  if (ink !== null) {
-    const inkWidth = Math.ceil(ink.maxX) - Math.floor(ink.minX)
-    // Off centre to the left, and raised, to leave the score its corner.
-    const shift = tile.hasScore ? Math.floor(SQUARE * (score >= 10 ? 0.07 : 0.03)) : 0
-    const baseline = LETTER_BASELINE - (tile.hasScore ? LETTER_LIFT : 0)
-    canvas.glyph(tile.letter, size, tile.isBold, x + Math.floor((SQUARE - inkWidth) / 2) - shift, y + baseline, tile.fg)
+  // A Catalan tile of several letters (L·L) draws them all, as large as
+  // fits across it.
+  const chars = [...tileLabel(tile.letter)]
+  const fullSize = tile.isLarge === true && !tile.hasScore ? LARGE_LETTER_SIZE : LETTER_SIZE
+  const width = (ink: InkBox | null) => (ink === null ? 0 : Math.ceil(ink.maxX) - Math.floor(ink.minX))
+  const inksAt = (size: number) => chars.map(char => ({ char, ink: glyphInk(font, char, size, tile.isBold) }))
+  const widthOf = (inks: ReturnType<typeof inksAt>) =>
+    inks.reduce((total, { ink }) => total + width(ink), 0) + LETTER_GAP * (chars.length - 1)
+  const fullWidth = widthOf(inksAt(fullSize))
+  const room = SQUARE * MANY_LETTERS_WIDTH
+  const size = chars.length === 1 || fullWidth <= room ? fullSize : Math.floor((fullSize * room) / fullWidth)
+  const inks = size === fullSize ? inksAt(fullSize) : inksAt(size)
+  const inkWidth = widthOf(inks)
+  const score = tileScores[tile.letter] ?? 0
+  // Off centre to the left, and raised, to leave the score its corner.
+  const shift = tile.hasScore ? Math.floor(SQUARE * (score >= 10 ? 0.07 : 0.03)) : 0
+  const baseline = LETTER_BASELINE - (tile.hasScore ? LETTER_LIFT : 0)
+  let left = x + Math.floor((SQUARE - inkWidth) / 2) - shift
+  for (const { char, ink } of inks) {
+    if (ink !== null) {
+      canvas.glyph(char, size, tile.isBold, left, y + baseline, tile.fg)
+      left += width(ink) + LETTER_GAP
+    }
   }
   if (!tile.hasScore) {
     return

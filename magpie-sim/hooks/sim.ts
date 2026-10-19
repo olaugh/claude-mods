@@ -5,6 +5,7 @@
 // lexicon, which the output leaves out.
 
 import { BOARD_DIM, COLUMN_LETTERS } from './layout'
+import { packTiles, unpackTiles } from './tiles'
 
 export type PlyStats = { score: number; stdev: number; bingoPct: number }
 
@@ -58,7 +59,7 @@ export type Sim = {
 const PLAY_LINE = /^\s*(\d+):\s+(.*)$/
 // `shgame`'s header or top border, whichever holds the on-turn marker: a
 // name, a rack and a score.
-const ON_TURN = /^\s+(?:A B C D E F G H I J K L M N O|-{30})\s+>\s+(.+?)\s{2,}([A-Za-z?]{1,7})\s+-?\d+\s*$/m
+const ON_TURN = /^\s+(?:A B C D E F G H I J K L M N O|-{30})\s+>\s+(.+?)\s{2,}([\p{L}?]{1,7})\s+-?\d+\s*$/mu
 const ENDGAME_HEADER = /^Endgame \(depth: (\d+), time: ([\d.]+)s, status: ([^)]*)\)/
 // An endgame row's first move: square, word, score, and a going-out play's
 // end points in parentheses.
@@ -187,7 +188,7 @@ export function parseBoard(lines: readonly string[]): string[] | null {
       board.push(
         Array.from({ length: BOARD_DIM }, (_, col) => {
           const char = squares[col * 2] ?? ' '
-          return /[A-Za-z]/.test(char) ? char : '.'
+          return /\p{L}/u.test(char) ? char : '.'
         }).join(''),
       )
     }
@@ -197,7 +198,7 @@ export function parseBoard(lines: readonly string[]): string[] | null {
 
 /** The rack the player to move holds, as the last game printed shows it. */
 function onTurnRack(text: string): string | undefined {
-  const racks = [...text.matchAll(new RegExp(ON_TURN.source, 'gm'))]
+  const racks = [...text.matchAll(new RegExp(ON_TURN.source, 'gmu'))]
   return racks[racks.length - 1]?.[2]
 }
 
@@ -260,7 +261,10 @@ function leaveAfter(rack: string, play: Play): string {
   return [...rack].filter((_, index) => ghosts[index] !== true).join('')
 }
 
-export function parseSim(text: string): Sim {
+export function parseSim(printed: string): Sim {
+  // A Catalan tile is one letter here (tiles.ts), as MAGPIE's own output
+  // has it by now; a file's still has it in brackets.
+  const text = packTiles(printed)
   const lines = text.split('\n')
   const endgameAt = lines.findIndex(line => ENDGAME_HEADER.test(line))
   if (endgameAt >= 0) {
@@ -374,12 +378,12 @@ export function rackGhosts(rack: string, play: Play): boolean[] {
 /** What the picture shows, in words, for the surfaces that cannot see it. */
 export function describePlay(play: Play): string {
   if (play.kind === 'exchange') {
-    return `Exchange ${play.tiles}, keeping ${play.leave || 'nothing'}`
+    return unpackTiles(`Exchange ${play.tiles}, keeping ${play.leave || 'nothing'}`)
   }
   if (play.kind === 'pass') {
     return 'Pass'
   }
-  return `The board with ${play.id} placed, ${play.score} points`
+  return unpackTiles(`The board with ${play.id} placed, ${play.score} points`)
 }
 
 /** A play as people write it: `8F DROP`, an exchange `-EO`, `pass`. */

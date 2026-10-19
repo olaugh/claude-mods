@@ -5,6 +5,8 @@
 // standard input.
 
 import { BOARD_DIM, COLUMN_LETTERS, premiumAt } from './layout'
+import { hasWordmap } from './setup'
+import { packTiles, tileOf } from './tiles'
 
 export const DEFAULT_LEXICON = 'CSW24'
 // The lexicon for a position that names none: the person's own (the mod's
@@ -86,12 +88,12 @@ export type SimRequest = {
   at?: Selector
 }
 
-const RACK = /^[A-Za-z?]{1,7}$/
+const RACK = /^[\p{L}?]{1,7}$/u
 const LEXICON_NAME = /^[A-Z]+\d*$/
 // Pages MAGPIE's `load` knows how to read a game from.
 const GAME_SITES = /(^|\.)(woogles\.io|cross-tables\.com)$/i
 const COORDINATE = /^(?:\d{1,2}[A-O]|[A-O]\d{1,2})$/
-const PLAYED_WORD = /^[A-Za-z?.()]+$/
+const PLAYED_WORD = /^[\p{L}?.()]+$/u
 
 /** Where `/magpie next turn` and the like move in the game the pane shows. */
 export type Navigation = 'next' | 'previous' | 'first' | 'last'
@@ -203,7 +205,7 @@ The object is one of:
   A move: {"word":"INERTIAS"} with whatever they said of it: "by" ("me" for the person, "opponent"), "square" (its first tile's square, 8H or H8 as above), "direction" ("across" or "down"), "score", "through" (tiles on the board it went through: [{"letter":"A","word":"INERTIAS"}], the word on the board each is in), "premium" ("TW", "DW", "TL" or "DL": "to the TWS" is TW). "leave": the tiles they kept ("keeping ion" is "ION"). A pass is {"pass":true}. The word is in capitals, the board's tiles in it included; when they say which tile was a blank, that letter alone in lowercase ("the second z was the blank": JAZz). Moves alternate: the person's own first move is from the rack they hold, often one of the top plays.
   "rack": the tiles they hold now, in capitals, ? for a blank; a ? after letters is the blank ("polish?" is ?HILOPS, not a question), and a rack is not a word to look up. Leave it out when they have not said.
 
-Words like "sim", "opening", "rack", "the", "turn", "where", "played" only say what the rest is. Words are case-insensitive except as "after" says. The person may write in any language: read "simule le tirage AEINRST" or "ich habe ÄRGER gelegt" as you would the English. A position with no lexicon named is in ${preferred}: leave "lexicon" out for it.
+Words like "sim", "opening", "rack", "the", "turn", "where", "played" only say what the rest is. Words are case-insensitive except as "after" says. The person may write in any language: read "simule le tirage AEINRST" or "ich habe ÄRGER gelegt" as you would the English. A letter with an accent is a tile of its own (Ä, Ł, Ç): keep it. Catalan's tiles of two letters go in brackets, [L·L] (with its dot), [NY] and [QU] ("anys" is A[NY]S, "quatre" is [QU]ATRE, "ral·li" is RA[L·L]I, a blank inside in lowercase: [ny]). A position with no lexicon named is in ${preferred}: leave "lexicon" out for it.
 
 Examples:
 "ADOPQRR" -> {"action":"sim","position":"ADOPQRR"}
@@ -228,7 +230,8 @@ const NAVIGATIONS: readonly Navigation[] = ['next', 'previous', 'first', 'last']
 
 /** The interpreter's reply as an Intent; throws on anything else. */
 export function parseIntent(reply: string): Intent {
-  const json = /\{[\s\S]*\}/.exec(reply)?.[0]
+  // A Catalan tile is one letter here (tiles.ts).
+  const json = /\{[\s\S]*\}/.exec(packTiles(reply))?.[0]
   if (json === undefined) {
     throw new Error(`the reply held no JSON: ${reply.slice(0, 200)}`)
   }
@@ -374,7 +377,7 @@ function placedMove(move: PlacedMove): PlacedMove {
 
 // Which position of a game the intent names, if any.
 function selectorOf(intent: Extract<Intent, { action: 'sim' }>): Selector | undefined {
-  const asWord = (word: string) => word.replace(/[^A-Za-z]/g, '').toUpperCase()
+  const asWord = (word: string) => word.replace(/[^\p{L}]/gu, '').toUpperCase()
   if (intent.turn !== undefined) {
     if (!Number.isInteger(intent.turn) || intent.turn < 1) {
       throw new Error(`a turn is a number from 1, not ${intent.turn}`)
@@ -494,7 +497,8 @@ const ASCII_BOARD = [
 export function simOptions(lexicon: string | undefined, threads: number, accelerators: Accelerators): string[] {
   return [
     ...(lexicon === undefined ? [] : ['-lex', lexicon]),
-    '-wmp', 'true',
+    // Polish has no word map.
+    '-wmp', String(lexicon === undefined || hasWordmap(lexicon)),
     '-rit', String(accelerators.rit),
     '-wit', String(accelerators.wit),
     // Mapped, the 1.9 GB RIT costs no time to load; pages come in as used.
@@ -524,27 +528,28 @@ export const ENDGAME_PLAYS = 50
 // The most tiles the player to move can fail to see with the bag empty: the
 // other rack.
 const ENDGAME_UNSEEN = 7
-// An English set, which a CGP's unseen tiles are counted from.
+// An English set's tiles, which a CGP's unseen tiles are counted from when
+// its set is not known.
 const TILES_IN_SET = 100
 
 export function modeFor(unseen: number | undefined): Mode {
   return unseen !== undefined && unseen <= ENDGAME_UNSEEN ? 'endgame' : 'sim'
 }
 
-/** The tiles a CGP's player to move cannot see: the set less the board's and
- * their rack's. */
-export function cgpUnseen(cgp: string): number {
+/** The tiles a CGP's player to move cannot see: the set (`setSize` tiles)
+ * less the board's and their rack's. */
+export function cgpUnseen(cgp: string, setSize = TILES_IN_SET): number {
   const [board = '', racks = ''] = cgp.trim().split(/\s+/)
-  const onBoard = (board.match(/[A-Za-z]/g) ?? []).length
+  const onBoard = (board.match(/\p{L}/gu) ?? []).length
   const rack = (racks.split('/')[0] ?? '').length
-  return TILES_IN_SET - onBoard - rack
+  return setSize - onBoard - rack
 }
 
 // The settings an endgame solve runs with, after `setoptions`.
 function endgameOptions(lexicon: string | undefined, threads: number): string[] {
   return [
     ...(lexicon === undefined ? [] : ['-lex', lexicon]),
-    '-wmp', 'true',
+    '-wmp', String(lexicon === undefined || hasWordmap(lexicon)),
     '-etopk', String(ENDGAME_PLAYS),
     '-threads', String(threads),
     '-hr', 'false',
@@ -585,7 +590,7 @@ export type GcgPosition = {
 const PRINTED_GAME = /\n(?=\s+A B C D E F G H I J K L M N O)/
 // The header or the top border, whichever row holds the on-turn marker: a
 // name, a rack and a score.
-const ON_TURN = /^\s+(?:A B C D E F G H I J K L M N O|-{30})\s+>\s+(.+?)\s{2,}([A-Za-z?]{1,7})\s+-?\d+\s*$/m
+const ON_TURN = /^\s+(?:A B C D E F G H I J K L M N O|-{30})\s+>\s+(.+?)\s{2,}([\p{L}?]{1,7})\s+-?\d+\s*$/mu
 // `Event N (player):` beside the board, and on the next row what it was.
 const EVENT = /Event (\d+) \((.*?)\):[^\n]*\n[^\n]*\|\s+([^\n]*?)\s*$/m
 
@@ -864,7 +869,7 @@ export type MoveDescription = {
 }
 
 /** A word's letters in capitals, whatever marked the board's or the blanks. */
-export const letters = (word: string) => word.replace(/[^A-Za-z]/g, '').toUpperCase()
+export const letters = (word: string) => word.replace(/[^\p{L}]/gu, '').toUpperCase()
 
 /** Where each tile of a play goes, the board's own (in parentheses) marked. */
 export function playSquares(coordinate: string, word: string): { row: number; col: number; letter: string; isThrough: boolean }[] {
@@ -997,7 +1002,7 @@ function parseMove(value: unknown): MoveDescription {
     throw new Error('a move with no word')
   }
   const move: MoveDescription = { word: canonicalWord(spelling(fields.word)), ...by }
-  if (typeof fields.leave === 'string' && /^[A-Za-z?]{1,7}$/.test(fields.leave)) {
+  if (typeof fields.leave === 'string' && /^[\p{L}?]{1,7}$/u.test(fields.leave)) {
     move.leave = fields.leave.toUpperCase()
   }
   if (typeof fields.square === 'string' && COORDINATE.test(fields.square.toUpperCase())) {
@@ -1012,7 +1017,7 @@ function parseMove(value: unknown): MoveDescription {
   if (Array.isArray(fields.through)) {
     move.through = fields.through.flatMap(item => {
       const { letter, word } = (typeof item === 'object' && item !== null ? item : {}) as Record<string, unknown>
-      return typeof letter === 'string' && /^[A-Za-z]$/.test(letter)
+      return typeof letter === 'string' && /^\p{L}$/u.test(letter)
         ? [typeof word === 'string' && word !== '' ? { letter: letter.toUpperCase(), word: letters(word) } : { letter: letter.toUpperCase() }]
         : []
     })
@@ -1043,22 +1048,25 @@ export function distributionName(lexicon: string): string | undefined {
   return DISTRIBUTIONS.find(([pattern]) => pattern.test(lexicon))?.[1]
 }
 
-/** A distribution file (`A,a,9,1,...`): each tile and how many the set has.
- * Undefined for a set with tiles of more than one letter, which the
- * counting here does not read. */
-export function parseDistribution(csv: string): Tiles | undefined {
-  const tiles: Tiles = new Map()
-  for (const line of csv.split('\n')) {
-    const [tile, , count] = line.split(',')
-    if (tile === undefined || tile === '' || count === undefined) {
-      continue
-    }
-    if ([...tile].length !== 1) {
-      return undefined
-    }
-    tiles.set(tile.toUpperCase(), Number(count))
-  }
-  return tiles
+// A distribution file's rows (`A,a,9,1,...`): each tile, a Catalan one of
+// several letters packed into one (tiles.ts), and its count and score.
+function distributionRows(csv: string): { tile: string; count: number; score: number }[] {
+  return csv.split('\n').flatMap(line => {
+    const [name, , count, score] = line.trim().split(',')
+    return name === undefined || name === '' || count === undefined
+      ? []
+      : [{ tile: tileOf(name).toUpperCase(), count: Number(count), score: Number(score ?? 0) }]
+  })
+}
+
+/** A distribution file: each tile and how many the set has. */
+export function parseDistribution(csv: string): Tiles {
+  return new Map(distributionRows(csv).map(({ tile, count }) => [tile, count]))
+}
+
+/** A distribution file: what each tile scores. */
+export function parseScores(csv: string): Readonly<Record<string, number>> {
+  return Object.fromEntries(distributionRows(csv).map(({ tile, score }) => [tile, score]))
 }
 
 /** The set less the tiles on `board` (a blank is lowercase) and `less`. */
@@ -1120,7 +1128,7 @@ export function withBlanks(needed: string, left: Tiles): { rack: string } | { sh
 
 /** A word's letters, case kept where the person said which were blanks. */
 export function spelling(word: string): string {
-  return word.replace(/[^A-Za-z]/g, '')
+  return word.replace(/[^\p{L}]/gu, '')
 }
 
 /** `board` with a play's own tiles on it (its board tiles are there). */

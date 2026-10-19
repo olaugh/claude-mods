@@ -3,7 +3,9 @@ import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
 import type { SortKey } from '../types'
 import { cardPicture } from './card'
+import { setTileScores } from './board'
 import { boardPicture, tilesColumnPicture, type Picture } from './draw'
+import { TILE_SCORES } from './layout'
 import {
   cgpUnseen,
   applyMove,
@@ -17,6 +19,7 @@ import {
   missingTiles,
   parseDistribution,
   parseGenerated,
+  parseScores,
   rackLess,
   racksFor,
   runLexicon,
@@ -58,6 +61,7 @@ import {
 import { encodePng } from './png'
 import {
   defaultMagpieDir,
+  englishNameOf,
   executableIn,
   firstLexicon,
   homeOf,
@@ -74,6 +78,7 @@ import {
 import { describePlay, latestTable, parseBoard, parseSim, playName, playTiles, resultText, type Play, type Sim } from './sim'
 import { boardSvg } from './svg'
 import { SELECTED_ROW } from './theme'
+import { packTiles, unpackTiles } from './tiles'
 import { parseFont, type Font } from './truetype'
 
 const PLUGIN = 'magpie-sim'
@@ -204,7 +209,9 @@ export async function loadSim($: EngineInterface): Promise<Sim> {
   const source = text !== '' ? text : await simPath($)
   if (simLoad?.source !== source) {
     const parsed = text !== '' ? Promise.resolve().then(() => parseSim(text)) : $.fs.read(source).then(parseSim)
-    const sim = parsed.then(loaded => {
+    const sim = parsed.then(async loaded => {
+      // Its tiles drawn with their own set's scores.
+      setTileScores(await scoresFor($, loaded.lexicon).catch(() => TILE_SCORES))
       const position = `${loaded.lexicon}|${loaded.rack}|${(loaded.board ?? []).join('/')}`
       if (position !== picturesOf) {
         pictures.clear()
@@ -399,15 +406,16 @@ const couldNotRun = (where: Magpie, error: unknown) =>
     `could not run ${where.binary} (${error instanceof Error ? error.message : String(error)}); install MAGPIE there, or set the mod's MAGPIE directory with \`claude plugin configure magpie-sim@olaugh-mods\``,
   )
 
-// MAGPIE's lines as it printed them, a Windows one's CRLFs as LFs.
-const lfLines = (text: string) => text.replaceAll('\r\n', '\n')
+// What MAGPIE printed as the mod reads it: a Windows one's CRLFs as LFs,
+// bracketed tiles packed (tiles.ts).
+const fromMagpie = (text: string) => packTiles(text.replaceAll('\r\n', '\n'))
 
 async function execute($: EngineInterface, where: Magpie, label: string, run: MagpieRun) {
   note(`running ${label}: ${where.binary} ${run.args.join(' ')} <<< ${run.stdin.trim().split('\n').slice(0, 3).join('; ')}`)
   let result
   try {
-    const ran = await $.process.run([where.binary, ...run.args], { cwd: where.cwd, stdin: run.stdin, timeoutMs: RUN_TIMEOUT_MS })
-    result = { ...ran, stdout: lfLines(ran.stdout), stderr: lfLines(ran.stderr) }
+    const ran = await $.process.run([where.binary, ...run.args], { cwd: where.cwd, stdin: unpackTiles(run.stdin), timeoutMs: RUN_TIMEOUT_MS })
+    result = { ...ran, stdout: fromMagpie(ran.stdout), stderr: fromMagpie(ran.stderr) }
   } catch (error) {
     throw couldNotRun(where, error)
   }
@@ -431,12 +439,12 @@ async function executeStreaming(
   let handed = 0
   try {
     // Leaving the loop ends the child.
-    for await (const { stream, text } of $.process.spawn({ argv: [where.binary, ...run.args], cwd: where.cwd, input: run.stdin })) {
+    for await (const { stream, text } of $.process.spawn({ argv: [where.binary, ...run.args], cwd: where.cwd, input: unpackTiles(run.stdin) })) {
       if (stream === 'stderr') {
-        stderr = lfLines(stderr + text)
+        stderr = fromMagpie(stderr + text)
       } else {
         // Whole: a CRLF may come in two pieces.
-        stdout = lfLines(stdout + text)
+        stdout = fromMagpie(stdout + text)
         const table = latestTable(stdout)
         if (table !== undefined && table.count > handed) {
           handed = table.count
@@ -469,7 +477,13 @@ async function planSim($: EngineInterface, request: SimRequest): Promise<{ plan:
   let label = request.label
   let turn: number | undefined
   let turns: number | undefined
-  let mode: Mode = resolved.kind === 'cgp' ? modeFor(cgpUnseen(resolved.cgp)) : 'sim'
+  let mode: Mode = 'sim'
+  if (resolved.kind === 'cgp') {
+    // Unseen tiles counted from the lexicon's own set (102 tiles in French).
+    const set = await tileSet($, where, runLexicon(resolved, lexicon))
+    const setSize = set === undefined ? undefined : [...set.values()].reduce((total, count) => total + count, 0)
+    mode = modeFor(cgpUnseen(resolved.cgp, setSize))
+  }
   if (resolved.kind === 'gcg') {
     // Every position of the game, to find the one asked for. The scan also
     // learns whether the GCG names its lexicon (one MAGPIE fetched is
@@ -616,8 +630,9 @@ type Column = {
 const signed = (value: number) => (value > 0 ? '+' : '') + value.toFixed(2)
 
 const COLUMNS: readonly Column[] = [
-  { title: 'Play', sort: 'play', isLeft: true, isCompact: true, cell: playName },
-  { title: 'Leave', isLeft: true, cell: play => play.leave },
+  // Cells as people read them: a Catalan tile in brackets (tiles.ts).
+  { title: 'Play', sort: 'play', isLeft: true, isCompact: true, cell: play => unpackTiles(playName(play)) },
+  { title: 'Leave', isLeft: true, cell: play => unpackTiles(play.leave) },
   { title: 'Sc', sort: 'score', isCompact: true, cell: play => String(play.score) },
   { title: 'Win%', sort: 'win', isCompact: true, cell: play => play.winPct.toFixed(2) },
   { title: '±', cell: play => play.winSe.toFixed(2) },
@@ -632,11 +647,11 @@ const COLUMNS: readonly Column[] = [
 // An endgame's table: the final spread, what the line nets, and the rest of
 // the line.
 const ENDGAME_COLUMNS: readonly Column[] = [
-  { title: 'Play', sort: 'play', isLeft: true, isCompact: true, cell: playName },
+  { title: 'Play', sort: 'play', isLeft: true, isCompact: true, cell: play => unpackTiles(playName(play)) },
   { title: 'Sc', sort: 'score', isCompact: true, cell: play => String(play.score) },
   { title: 'Result', sort: 'result', isCompact: true, cell: play => resultText(play.result) },
   { title: 'Net', sort: 'net', isCompact: true, cell: play => (play.net === undefined ? '' : `${play.net > 0 ? '+' : ''}${play.net}`) },
-  { title: 'Then', isLeft: true, cell: play => play.line ?? '' },
+  { title: 'Then', isLeft: true, cell: play => unpackTiles(play.line ?? '') },
 ]
 // The selection marker and the sim's rank, before the columns.
 const RANK_WIDTH = 5
@@ -765,11 +780,15 @@ export function summaryLine(sim: Sim): string {
           `${sim.iterations.toLocaleString('en-US')} iters in ${sim.seconds.toFixed(1)} s`,
         ]),
   ]
-  return parts.filter(part => part !== '').join(' · ')
+  return unpackTiles(parts.filter(part => part !== '').join(' · '))
 }
 
 /** The top plays as the simulate tool reports them to the model. */
 export function reportLines(sim: Sim, count: number): string[] {
+  return reportedLines(sim, count).map(unpackTiles)
+}
+
+function reportedLines(sim: Sim, count: number): string[] {
   if (sim.kind === 'endgame') {
     return sim.plays
       .slice(0, count)
@@ -956,6 +975,31 @@ async function currentTitle($: EngineInterface): Promise<string> {
 let language = 'English'
 
 const NOT_INSTALLED = 'MAGPIE, which runs the sims, is not installed yet'
+// A reply put in the person's language: long enough for any the mod writes.
+const TRANSLATION_MAX_TOKENS = 1000
+
+/** A reply of the mod's in the person's language: its messages are English,
+ * so the quick model writes them again in theirs, the plays, racks and
+ * squares as they are. As it is in English, or when the model does not
+ * answer. */
+async function inLanguage($: EngineInterface, text: string): Promise<string> {
+  const target = englishNameOf(language)
+  if (target === 'English' || text.trim() === '') {
+    return text
+  }
+  const reply = await $.model.complete({
+    model: INTERPRETER_MODEL,
+    system: `You translate the replies of /magpie, a command that analyzes crossword (Scrabble) positions, into ${target}. Keep exactly as written: plays and coordinates (8G VAV, H8 (I)NERTIAS, -EO), racks and words in capitals, tiles in brackets ([NY]), lexicon names, numbers, file paths, URLs, and commands (/magpie ...). Keep the line breaks. Reply with the translation and nothing else.`,
+    prompt: text,
+    maxTokens: TRANSLATION_MAX_TOKENS,
+    timeoutMs: INTERPRETER_TIMEOUT_MS,
+  })
+  if (!reply.isAnswered || reply.text.trim() === '') {
+    note(`could not translate into ${target}: ${reply.isAnswered ? 'empty' : reply.reason}`)
+    return text
+  }
+  return reply.text.trim()
+}
 
 // Whether MAGPIE and its data are where the mod runs them.
 async function isInstalled($: EngineInterface): Promise<boolean> {
@@ -1104,7 +1148,7 @@ async function makePicture($: EngineInterface, given?: Sim): Promise<{ file: str
   }
   const picture = cardPicture(await loadFont($), sim, shown, sim.label || sim.rack, cardSubtitle(sim))
   const directory = await pictureFolder($)
-  const name = `${(sim.label || sim.rack).replace(/[^A-Za-z0-9]+/g, '-').slice(0, 60)}-${Date.now()}`
+  const name = `${(sim.label || sim.rack).replace(/[^\p{L}\p{N}]+/gu, '-').slice(0, 60)}-${Date.now()}`
   const raw = `${directory}/${name}.raw.png`
   const path = `${directory}/${name}.png`
   // The file is binary and $.fs writes text: its base64 decoded on the way,
@@ -1240,6 +1284,26 @@ async function tileSet($: EngineInterface, where: Magpie, lexicon: string | unde
     .catch(() => undefined)
 }
 
+const scoresOfSets = new Map<string, Readonly<Record<string, number>>>()
+
+// What each tile of the lexicon's set scores, from MAGPIE's own data;
+// English's while that cannot be read.
+async function scoresFor($: EngineInterface, lexicon: string): Promise<Readonly<Record<string, number>>> {
+  const name = distributionName(lexicon || preferredLexicon()) ?? 'english'
+  const known = scoresOfSets.get(name)
+  if (known !== undefined) {
+    return known
+  }
+  const where = await findMagpie($)
+  const csv = await $.fs.read(`${where.cwd}/data/letterdistributions/${name}.csv`).catch(() => '')
+  const scores = parseScores(csv)
+  if (Object.keys(scores).length === 0) {
+    return TILE_SCORES
+  }
+  scoresOfSets.set(name, scores)
+  return scores
+}
+
 /** Why the rack a plan moves with cannot be, before a sim waits on it:
  * MAGPIE's own check (`rack` on the position reached, a quick run), said
  * with the tiles short where the set's counts tell. */
@@ -1328,7 +1392,7 @@ async function resolvePlay(
       }
       racks = possible
     } else if (!isMine) {
-      racks = racks.map(rack => rack.replace(/[a-z]/g, '?'))
+      racks = racks.map(rack => rack.replace(/\p{Ll}/gu, '?'))
     }
     const { result } = await execute($, plan.where, `finding ${move.word}`, generateRun(at(played), reach, racks))
     // MAGPIE's own print of the board this move went on.
@@ -1380,7 +1444,7 @@ async function resolvePlay(
     const blanks = ranked.filter(play => where(play) === where(best))
     if (blanks.length > 1) {
       // In the order the blank comes in the word, each named by its place.
-      const firstBlank = (word: string) => word.replace(/\([^)]*\)/g, through => through.toUpperCase()).search(/[a-z]/)
+      const firstBlank = (word: string) => word.replace(/\([^)]*\)/g, through => through.toUpperCase()).search(/\p{Ll}/u)
       return {
         followUp: true,
         answer: `Which tile of ${letters(move.word)} at ${best.coordinate} was the blank: ${[...blanks]
@@ -1528,6 +1592,171 @@ function askWhich(request: SimRequest, candidates: readonly GcgPosition[]): stri
   ]
 }
 
+/** What /magpie answers, in English: a question, what it opened, or that a
+ * sim runs. A command from the phone (`fromPhone`) gets a picture.
+ */
+async function magpieCommand($: EngineInterface, args: string, fromPhone: boolean): Promise<{ text: string }> {
+  if (args === 'why') {
+    const panes = (await $.ui.panes()).map(
+      pane => `${pane.id} placed=${pane.isPlaced} shown=${pane.isShown} focused=${pane.isFocused}`,
+    )
+    return {
+      text: [
+        `Surfaces attached: ${(await $.session.surfaces()).join(', ') || 'none'}.`,
+        `Open panes: ${panes.join('; ') || 'none'}.`,
+        `What the mod did:${log.length === 0 ? ' nothing yet' : ''}`,
+        ...log,
+      ].join('\n'),
+    }
+  }
+  if (args === 'setup') {
+    return { text: `${await openSetup($, true)}.` }
+  }
+  if (!(await isInstalled($))) {
+    return { text: `${NOT_INSTALLED}. ${await openSetup($, true)}: press Install there.` }
+  }
+  let found: Awaited<ReturnType<typeof requestFor>>
+  let planned: Awaited<ReturnType<typeof planSim>>
+  // A question this one does not answer is dropped: what was typed up to
+  // it is kept while the questions go on, the last few of it.
+  const previous = asked
+  const ask = (question: string) => {
+    asked = { typed: [...(previous?.typed ?? []), args].slice(-ASKED_KEPT), question }
+    return question
+  }
+  try {
+    found =
+      args === ''
+        ? { answer: 'Opened the MAGPIE sim pane.', reopen: true }
+        : await requestFor($, await interpret($, args))
+    asked = undefined
+    if ('answer' in found) {
+      if (found.followUp === true) {
+        ask(found.answer)
+      }
+      if (found.reopen === true) {
+        await openPane($, await currentTitle($), true)
+      }
+      if (found.setup === true) {
+        return { text: `${await openSetup($, true)}. ${found.answer}` }
+      }
+      if (found.picture === true || (fromPhone && found.reopen === true)) {
+        await sendPicture($)
+      }
+      return { text: found.answer }
+    }
+    planned = await planSim($, found.request)
+  } catch (error) {
+    return { text: error instanceof Error ? error.message : String(error) }
+  }
+  if ('candidates' in planned) {
+    const first = planned.candidates[0]
+    return {
+      text: ask(
+        [
+          ...askWhich(found.request, planned.candidates),
+          `Say which, e.g. /magpie ${found.request.source} turn ${first?.turn ?? 1}`,
+        ].join('\n'),
+      ),
+    }
+  }
+  const plan = planned.plan
+  try {
+    const problem = await rackProblem($, plan)
+    if (problem !== undefined) {
+      const text = `${found.message?.replace(/Simulating .*$/, '') ?? ''}${problem} What is the rack?`
+      // Moves typed out are kept, the pane standing on them, for the rack
+      // alone to follow; anything else is asked again.
+      if ((found.request.position.after ?? []).length === 0) {
+        return { text: ask(text) }
+      }
+      const pending: SimRequest = {
+        ...found.request,
+        position: { ...found.request.position, rack: '' },
+        label: found.request.label.replace(/^\S+ after /, 'next after '),
+      }
+      await update($, current, () =>
+        JSON.stringify({ request: pending, label: pending.label, lexicon: plan.lexicon ?? '' } satisfies Current),
+      )
+      return { text }
+    }
+  } catch (error) {
+    return { text: error instanceof Error ? error.message : String(error) }
+  }
+  const opened = await openPane($, `MAGPIE · ${plan.label}`, true)
+  // The sim outlives the command: the pane shows it running, then its
+  // results, or what went wrong.
+  void runPlan($, plan)
+    .then(sim => (fromPhone ? sendPicture($, sim) : undefined))
+    .catch((error: unknown) => note(`${plan.label}: ${String(error)}`))
+  return {
+    text: `${opened}. ${found.message === undefined ? planStatus(plan) : `${found.message} in ${lexiconText(plan)}`}. ${fromPhone ? 'A picture follows' : 'The pane fills in'} when it finishes.`,
+  }
+}
+
+/** What the simulate tool answers Claude: the top plays, or why not. */
+async function simulateTool($: EngineInterface, input: Record<string, unknown>): Promise<{ result: string } | { deny: string }> {
+  let request: SimRequest
+  let planned: Awaited<ReturnType<typeof planSim>>
+  if (!(await isInstalled($))) {
+    return {
+      result: `Not run: ${NOT_INSTALLED}. ${await openSetup($, false)}; ask the person to press Install there (it gets MAGPIE ${MAGPIE_VERSION} and about 195 MB of word lists), then call again.`,
+    }
+  }
+  try {
+    // The caller is a model already: its fields are the intent.
+    const found = await requestFor($, parseIntent(JSON.stringify({ ...input, action: 'sim' })))
+    if ('answer' in found) {
+      return { result: found.answer }
+    }
+    request = found.request
+    planned = await planSim($, request)
+  } catch (error) {
+    return { deny: `${PLUGIN}: ${error instanceof Error ? error.message : String(error)}` }
+  }
+  if ('candidates' in planned) {
+    return {
+      result: [
+        'Not run.',
+        ...askWhich(request, planned.candidates),
+        'Ask the person which they mean, then call again with `turn` set to it.',
+      ].join('\n'),
+    }
+  }
+  const plan = planned.plan
+  let sim: Sim
+  try {
+    const problem = await rackProblem($, plan)
+    if (problem !== undefined) {
+      return { result: `Not run. ${problem} Ask the person for their rack.` }
+    }
+  } catch (error) {
+    return { deny: `${PLUGIN}: ${error instanceof Error ? error.message : String(error)}` }
+  }
+  const opened = await openPane($, `MAGPIE · ${plan.label}`, false)
+  try {
+    sim = await runPlan($, plan)
+  } catch (error) {
+    return { deny: `${PLUGIN}: the sim of ${plan.label} failed: ${error instanceof Error ? error.message : String(error)}` }
+  }
+  let pictureLine = 'If the pane waits undrawn, the person can type /magpie to open it.'
+  // The caller is in a turn: it sends the picture itself.
+  if (input.picture === true || lastPromptOrigin === 'bridge') {
+    try {
+      pictureLine = sendInstruction(await makePicture($, sim))
+    } catch (error) {
+      pictureLine = `The picture could not be drawn: ${error instanceof Error ? error.message : String(error)}`
+    }
+  }
+  return {
+    result: [
+      `${opened}. ${summaryLine(sim)}, ${sim.plays.length} plays. Top ${sim.kind === 'endgame' ? 'by the solver' : 'by win%'}:`,
+      ...reportLines(sim, PLAYS_REPORTED),
+      pictureLine,
+    ].join('\n'),
+  }
+}
+
 export const register: Register = (on, options) => {
   magpieDir = typeof options.magpieDir === 'string' ? options.magpieDir.trim().replace(/[\\/]+$/, '') : DEFAULT_MAGPIE_DIR
   language = typeof options.language === 'string' && options.language !== '' ? options.language : 'English'
@@ -1615,168 +1844,17 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: 'magpie' }, async ($, e) => {
     const args = e.args.trim()
-    if (args === 'why') {
-      const panes = (await $.ui.panes()).map(
-        pane => `${pane.id} placed=${pane.isPlaced} shown=${pane.isShown} focused=${pane.isFocused}`,
-      )
-      return {
-        text: [
-          `Surfaces attached: ${(await $.session.surfaces()).join(', ') || 'none'}.`,
-          `Open panes: ${panes.join('; ') || 'none'}.`,
-          `What the mod did:${log.length === 0 ? ' nothing yet' : ''}`,
-          ...log,
-        ].join('\n'),
-      }
-    }
-    if (args === 'setup') {
-      return { text: `${await openSetup($, true)}.` }
-    }
-    if (!(await isInstalled($))) {
-      return { text: `${NOT_INSTALLED}. ${await openSetup($, true)}: press Install there.` }
-    }
     // The phone (or the web) over Remote Control draws no pane: a picture is
     // what it can show.
-    const fromPhone = e.origin?.kind === 'bridge'
-    let found: Awaited<ReturnType<typeof requestFor>>
-    let planned: Awaited<ReturnType<typeof planSim>>
-    // A question this one does not answer is dropped: what was typed up to
-    // it is kept while the questions go on, the last few of it.
-    const previous = asked
-    const ask = (question: string) => {
-      asked = { typed: [...(previous?.typed ?? []), args].slice(-ASKED_KEPT), question }
-      return question
-    }
-    try {
-      found =
-        args === ''
-          ? { answer: 'Opened the MAGPIE sim pane.', reopen: true }
-          : await requestFor($, await interpret($, args))
-      asked = undefined
-      if ('answer' in found) {
-        if (found.followUp === true) {
-          ask(found.answer)
-        }
-        if (found.reopen === true) {
-          await openPane($, await currentTitle($), true)
-        }
-        if (found.setup === true) {
-          return { text: `${await openSetup($, true)}. ${found.answer}` }
-        }
-        if (found.picture === true || (fromPhone && found.reopen === true)) {
-          await sendPicture($)
-        }
-        return { text: found.answer }
-      }
-      planned = await planSim($, found.request)
-    } catch (error) {
-      return { text: error instanceof Error ? error.message : String(error) }
-    }
-    if ('candidates' in planned) {
-      const first = planned.candidates[0]
-      return {
-        text: ask(
-          [
-            ...askWhich(found.request, planned.candidates),
-            `Say which, e.g. /magpie ${found.request.source} turn ${first?.turn ?? 1}`,
-          ].join('\n'),
-        ),
-      }
-    }
-    const plan = planned.plan
-    try {
-      const problem = await rackProblem($, plan)
-      if (problem !== undefined) {
-        const text = `${found.message?.replace(/Simulating .*$/, '') ?? ''}${problem} What is the rack?`
-        // Moves typed out are kept, the pane standing on them, for the rack
-        // alone to follow; anything else is asked again.
-        if ((found.request.position.after ?? []).length === 0) {
-          return { text: ask(text) }
-        }
-        const pending: SimRequest = {
-          ...found.request,
-          position: { ...found.request.position, rack: '' },
-          label: found.request.label.replace(/^\S+ after /, 'next after '),
-        }
-        await update($, current, () =>
-          JSON.stringify({ request: pending, label: pending.label, lexicon: plan.lexicon ?? '' } satisfies Current),
-        )
-        return { text }
-      }
-    } catch (error) {
-      return { text: error instanceof Error ? error.message : String(error) }
-    }
-    const opened = await openPane($, `MAGPIE · ${plan.label}`, true)
-    // The sim outlives the command: the pane shows it running, then its
-    // results, or what went wrong.
-    void runPlan($, plan)
-      .then(sim => (fromPhone ? sendPicture($, sim) : undefined))
-      .catch((error: unknown) => note(`${plan.label}: ${String(error)}`))
-    return {
-      text: `${opened}. ${found.message === undefined ? planStatus(plan) : `${found.message} in ${lexiconText(plan)}`}. ${fromPhone ? 'A picture follows' : 'The pane fills in'} when it finishes.`,
-    }
+    const { text } = await magpieCommand($, args, e.origin?.kind === 'bridge')
+    // `why` is for the mod's author: as it is.
+    return { text: args === 'why' ? text : await inLanguage($, unpackTiles(text)) }
   })
 
   on('tool.call', { tool: 'mcp__magpie-sim__simulate' }, async ($, e) => {
-    const input = e as Record<string, unknown>
-    let request: SimRequest
-    let planned: Awaited<ReturnType<typeof planSim>>
-    if (!(await isInstalled($))) {
-      return {
-        result: `Not run: ${NOT_INSTALLED}. ${await openSetup($, false)}; ask the person to press Install there (it gets MAGPIE ${MAGPIE_VERSION} and about 195 MB of word lists), then call again.`,
-      }
-    }
-    try {
-      // The caller is a model already: its fields are the intent.
-      const found = await requestFor($, parseIntent(JSON.stringify({ ...input, action: 'sim' })))
-      if ('answer' in found) {
-        return { result: found.answer }
-      }
-      request = found.request
-      planned = await planSim($, request)
-    } catch (error) {
-      return { deny: `${PLUGIN}: ${error instanceof Error ? error.message : String(error)}` }
-    }
-    if ('candidates' in planned) {
-      return {
-        result: [
-          'Not run.',
-          ...askWhich(request, planned.candidates),
-          'Ask the person which they mean, then call again with `turn` set to it.',
-        ].join('\n'),
-      }
-    }
-    const plan = planned.plan
-    let sim: Sim
-    try {
-      const problem = await rackProblem($, plan)
-      if (problem !== undefined) {
-        return { result: `Not run. ${problem} Ask the person for their rack.` }
-      }
-    } catch (error) {
-      return { deny: `${PLUGIN}: ${error instanceof Error ? error.message : String(error)}` }
-    }
-    const opened = await openPane($, `MAGPIE · ${plan.label}`, false)
-    try {
-      sim = await runPlan($, plan)
-    } catch (error) {
-      return { deny: `${PLUGIN}: the sim of ${plan.label} failed: ${error instanceof Error ? error.message : String(error)}` }
-    }
-    let pictureLine = 'If the pane waits undrawn, the person can type /magpie to open it.'
-    // The caller is in a turn: it sends the picture itself.
-    if (input.picture === true || lastPromptOrigin === 'bridge') {
-      try {
-        pictureLine = sendInstruction(await makePicture($, sim))
-      } catch (error) {
-        pictureLine = `The picture could not be drawn: ${error instanceof Error ? error.message : String(error)}`
-      }
-    }
-    return {
-      result: [
-        `${opened}. ${summaryLine(sim)}, ${sim.plays.length} plays. Top ${sim.kind === 'endgame' ? 'by the solver' : 'by win%'}:`,
-        ...reportLines(sim, PLAYS_REPORTED),
-        pictureLine,
-      ].join('\n'),
-    }
+    const answer = await simulateTool($, e as Record<string, unknown>)
+    // A Catalan tile in brackets, as MAGPIE writes it (tiles.ts).
+    return 'result' in answer ? { result: unpackTiles(answer.result) } : { deny: unpackTiles(answer.deny) }
   }).catch(($, e, next) => (next.called ? next(e) : { deny: `${PLUGIN}: the sim failed` }))
 
   on('tool.call', { tool: 'mcp__magpie-sim__show' }, async ($, e) => {

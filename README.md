@@ -91,6 +91,11 @@ the final spread (`W+20`, `L-10`, `T=0`), Net what the line nets, Then the rest 
   (about 195 MB, every language) and build your lexicon's word map. About a minute on a Mac, all told. `/magpie setup`
   opens the pane again, to change the language or lexicon; until MAGPIE is installed, `/magpie` and the `simulate` tool
   open it too.
+- Languages: every set MAGPIE plays. Tiles with accents are tiles of their own (Ä, Ł, Ç), drawn with their own set's
+  scores; Catalan's two-letter tiles are written as MAGPIE writes them, `[L·L]`, `[NY]`, `[QU]`, and drawn on one tile.
+  Write `/magpie` in your own language; with a language other than English chosen, its replies come back in that
+  language (the quick model translates them, the plays and racks left as they are). Polish has no word map, so its
+  sims are slower.
 - MAGPIE lives in `~/.magpie` (`bin/magpie` and `data/`; `%LOCALAPPDATA%\MAGPIE` on Windows, where MAGPIE itself looks),
   or wherever `magpieDir` says (`claude plugin configure magpie-sim@olaugh-mods`). To use a MAGPIE checkout's own
   build instead, after `make release`: `mkdir -p ~/magpie/bin && cp bin/magpie ~/magpie/bin/ && cp -cR data ~/magpie/`
