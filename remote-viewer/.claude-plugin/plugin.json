@@ -1,0 +1,8 @@
+{
+  "name": "remote-viewer",
+  "version": "0.1.0",
+  "description": "Shows in the prompt footer when a phone or browser is attached to the session over Remote Control",
+  "author": {
+    "name": "olaugh"
+  }
+}

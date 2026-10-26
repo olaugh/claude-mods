@@ -19,6 +19,11 @@
       "name": "weekly-usage",
       "source": "./weekly-usage",
       "description": "Always shows the weekly usage limit percentage in the prompt footer, highlighted past 75%"
+    },
+    {
+      "name": "remote-viewer",
+      "source": "./remote-viewer",
+      "description": "Shows in the prompt footer when a phone or browser is attached to the session over Remote Control"
     }
   ]
 }

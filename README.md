@@ -9,6 +9,7 @@ In a terminal Claude Code session, type:
 ```
 /plugin install turn-copy --marketplace olaugh/claude-mods
 /plugin install weekly-usage --marketplace olaugh/claude-mods
+/plugin install remote-viewer --marketplace olaugh/claude-mods
 ```
 
 Answer `y` to add the marketplace, then pick the user scope (Enter). The mod is active right away and loads in every
@@ -19,6 +20,7 @@ To pick up changes later:
 ```
 claude plugin update turn-copy
 claude plugin update weekly-usage
+claude plugin update remote-viewer
 ```
 
 then `/reload-plugins` in a running session.
@@ -118,6 +120,17 @@ the theme's warning color, bold, and adds the countdown to the reset: `week 82% 
 - Terminal: led by the Nerd Font gauge glyph (Material `gauge` U+F029A). Desktop app: `Weekly 42%`.
 - Claude Code's own `You've used N% of your weekly limit` notification still shows: the mod API has no way to remove
   the engine's footer notifications (as of 2.1.306).
+
+### remote-viewer
+
+Says in the prompt footer when someone else is looking at the session over Remote Control: `phone`, `phone ×2`,
+`phone + desktop`, in the theme's blue, led by a Nerd Font cellphone (U+F011C) or monitor (U+F0379). Nothing while no
+remote client is attached. Terminal only (an attached app's own footer does not name itself).
+
+- It shows clients attached, not whether Remote Control is on: the mod API has no way to read the connection (as of
+  2.1.306). Claude Code's own dim `/rc` at the bottom right shows that.
+- To start Remote Control in every session, put `"remoteControlAtStartup": true` in `~/.claude/settings.json` (user
+  settings only; a project's settings cannot turn it on).
 
 Agents (Claude sessions) installing or writing mods: see [AGENTS.md](AGENTS.md).
 
