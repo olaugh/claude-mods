@@ -8,6 +8,7 @@ In a terminal Claude Code session, type:
 
 ```
 /plugin install turn-copy --marketplace olaugh/claude-mods
+/plugin install weekly-usage --marketplace olaugh/claude-mods
 ```
 
 Answer `y` to add the marketplace, then pick the user scope (Enter). The mod is active right away and loads in every
@@ -17,6 +18,7 @@ To pick up changes later:
 
 ```
 claude plugin update turn-copy
+claude plugin update weekly-usage
 ```
 
 then `/reload-plugins` in a running session.
@@ -106,6 +108,16 @@ the final spread (`W+20`, `L-10`, `T=0`), Net what the line nets, Then the rest 
   Claude to send (a short turn: a file card reaches the phone only from a SendUserFile call in the conversation).
   Asking Claude from the phone sends one too. `/magpie picture` (or "send it to my phone") sends one of what the pane shows.
 - The tiles are Fira Code (the MAGPIE TUI's font, OFL, in `assets/`), rasterized by the mod itself.
+
+### weekly-usage
+
+Your weekly usage-limit percentage, always on, at the right of the prompt footer: `week 42%`, dim. Past 75% it turns
+the theme's warning color, bold, and adds the countdown to the reset: `week 82% · resets in 1d 4h`. It reads the
+`seven_day` window Claude Code gets with each response, so it shows nothing off a subscription.
+
+- Terminal: led by the Nerd Font gauge glyph (Material `gauge` U+F029A). Desktop app: `Weekly 42%`.
+- Claude Code's own `You've used N% of your weekly limit` notification still shows: the mod API has no way to remove
+  the engine's footer notifications (as of 2.1.306).
 
 Agents (Claude sessions) installing or writing mods: see [AGENTS.md](AGENTS.md).
 

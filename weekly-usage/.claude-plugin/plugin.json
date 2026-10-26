@@ -1,0 +1,8 @@
+{
+  "name": "weekly-usage",
+  "version": "0.1.0",
+  "description": "Always shows the weekly usage limit percentage in the prompt footer, highlighted past 75%",
+  "author": {
+    "name": "olaugh"
+  }
+}

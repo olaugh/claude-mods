@@ -14,6 +14,11 @@
       "name": "magpie-sim",
       "source": "./magpie-sim",
       "description": "Sim a crossword position in MAGPIE and browse the top plays in a pane, with a board picture of each: /magpie <rack | CGP | .cgp/.gcg path or URL>"
+    },
+    {
+      "name": "weekly-usage",
+      "source": "./weekly-usage",
+      "description": "Always shows the weekly usage limit percentage in the prompt footer, highlighted past 75%"
     }
   ]
 }
