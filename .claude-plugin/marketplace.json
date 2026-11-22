@@ -21,6 +21,11 @@
       "description": "Always shows the weekly usage limit percentage in the prompt footer, highlighted past 75%"
     },
     {
+      "name": "session-meter",
+      "source": "./session-meter",
+      "description": "Shows the model, context fill, weekly usage limit and the time until it resets in the prompt footer; /meter lists every limit window"
+    },
+    {
       "name": "remote-viewer",
       "source": "./remote-viewer",
       "description": "Shows in the prompt footer when a phone or browser is attached to the session over Remote Control"

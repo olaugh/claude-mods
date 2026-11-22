@@ -1,0 +1,8 @@
+{
+  "name": "session-meter",
+  "version": "0.1.0",
+  "description": "Shows the model, context fill, weekly usage limit and the time until it resets in the prompt footer; /meter lists every limit window",
+  "author": {
+    "name": "olaugh"
+  }
+}

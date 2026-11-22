@@ -10,6 +10,7 @@ In a terminal Claude Code session, type:
 /plugin install turn-copy --marketplace olaugh/claude-mods
 /plugin install weekly-usage --marketplace olaugh/claude-mods
 /plugin install remote-viewer --marketplace olaugh/claude-mods
+/plugin install session-meter --marketplace olaugh/claude-mods
 ```
 
 Answer `y` to add the marketplace, then pick the user scope (Enter). The mod is active right away and loads in every
@@ -21,6 +22,7 @@ To pick up changes later:
 claude plugin update turn-copy
 claude plugin update weekly-usage
 claude plugin update remote-viewer
+claude plugin update session-meter
 ```
 
 then `/reload-plugins` in a running session.
@@ -131,6 +133,16 @@ remote client is attached. Terminal only (an attached app's own footer does not 
   2.1.306). Claude Code's own dim `/rc` at the bottom right shows that.
 - To start Remote Control in every session, put `"remoteControlAtStartup": true` in `~/.claude/settings.json` (user
   settings only; a project's settings cannot turn it on).
+
+### session-meter
+
+The model, the context fill, the weekly usage limit and the time until it resets, at the right of the prompt footer:
+`Fable 5.2 ctx 34% week 26% resets 1d 4h`, dim. A figure past 75% turns the theme's warning color, bold.
+
+- `/meter` lists the model, the context tokens and every limit window Claude Code reports.
+- No per-model figure: neither the mod API nor the account's usage windows held one for Fable (checked 2026-11-21,
+  2.1.328).
+- It overlaps with weekly-usage: enable one or the other.
 
 Agents (Claude sessions) installing or writing mods: see [AGENTS.md](AGENTS.md).
 
